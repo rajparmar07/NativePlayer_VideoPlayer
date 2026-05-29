@@ -1,0 +1,6 @@
+{
+  "name": "Video Player",
+  "description": "High-performance video player with playlist management, subtitles, local files collection, stream links support, and offline downloads.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
