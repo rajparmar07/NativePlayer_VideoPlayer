@@ -1,11 +1,15 @@
 package com.example
 
+import android.app.Activity
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -16,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import com.example.data.AppDatabase
 import com.example.data.VideoRepository
 import com.example.ui.screens.*
@@ -43,15 +48,36 @@ class MainActivity : ComponentActivity() {
         // Core MVVM wiring
         val database = AppDatabase.getDatabase(applicationContext)
         val repository = VideoRepository(database.videoPlayerDao())
-        val factory = VideoPlayerViewModelFactory(repository)
+        val factory = VideoPlayerViewModelFactory(repository, applicationContext)
+        val viewModel: VideoPlayerViewModel by viewModels { factory }
 
         setContent {
-            MyApplicationTheme {
-                // Fetch the active ViewModel instance
-                val viewModel: VideoPlayerViewModel by viewModels { factory }
+            val appTheme by viewModel.appTheme.collectAsState()
+            MyApplicationTheme(appTheme = appTheme) {
+                val context = LocalContext.current
+                var lastBackPressTime by remember { mutableLongStateOf(0L) }
                 val currentPlayingVideo by viewModel.currentPlayingVideo.collectAsState()
 
                 var currentTab by remember { mutableStateOf(ScreenTab.Local) }
+                var isSettingsOpen by remember { mutableStateOf(false) }
+
+                // Intercept back clicks in Settings screen to exit settings
+                BackHandler(enabled = isSettingsOpen && currentPlayingVideo == null) {
+                    isSettingsOpen = false
+                }
+
+                // Intercept back clicks on the main tabs to prevent accidental exits
+                BackHandler(enabled = !isSettingsOpen && currentPlayingVideo == null) {
+                    val currentTime = System.currentTimeMillis()
+                    val activity = context as? Activity
+                    if (currentTime - lastBackPressTime < 2000) {
+                        activity?.finish()
+                        activity?.overridePendingTransition(0, android.R.anim.fade_out)
+                    } else {
+                        lastBackPressTime = currentTime
+                        Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+                    }
+                }
 
                 Box(modifier = Modifier.fillMaxSize()) {
                     // Main Screen with Sub-pages & Navigation
@@ -64,7 +90,7 @@ class MainActivity : ComponentActivity() {
                                     .windowInsetsPadding(WindowInsets.navigationBars)
                                     .testTag("main_navigation_bar")
                             ) {
-                                ScreenTab.values().forEach { tab ->
+                                ScreenTab.entries.forEach { tab ->
                                     val isSelected = currentTab == tab
                                     NavigationBarItem(
                                         selected = isSelected,
@@ -85,13 +111,14 @@ class MainActivity : ComponentActivity() {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(innerPadding)
+                                .padding(bottom = innerPadding.calculateBottomPadding())
                         ) {
                             when (currentTab) {
                                 ScreenTab.Local -> {
                                     LocalLibraryScreen(
                                         viewModel = viewModel,
-                                        onNavigateToPlayer = {}
+                                        onNavigateToPlayer = {},
+                                        onNavigateToSettings = { isSettingsOpen = true }
                                     )
                                 }
                                 ScreenTab.Playlists -> {
@@ -125,8 +152,30 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    // Settings Screen Overlay
+                    AnimatedVisibility(
+                        visible = isSettingsOpen && currentPlayingVideo == null,
+                        enter = slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)),
+                        exit = slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("settings_screen_container")
+                        ) {
+                            SettingsScreen(
+                                viewModel = viewModel,
+                                onBack = { isSettingsOpen = false }
+                            )
+                        }
+                    }
+
                     // Immersive Fullscreen Video Player Mode (Overlays completely to suppress notches and insets)
-                    if (currentPlayingVideo != null) {
+                    AnimatedVisibility(
+                        visible = currentPlayingVideo != null,
+                        enter = slideInVertically(initialOffsetY = { it }, animationSpec = tween(400)) + fadeIn(animationSpec = tween(400)),
+                        exit = slideOutVertically(targetOffsetY = { it }, animationSpec = tween(400)) + fadeOut(animationSpec = tween(400))
+                    ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()

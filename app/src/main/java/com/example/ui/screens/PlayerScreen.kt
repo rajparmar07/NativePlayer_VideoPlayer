@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.net.Uri
 import android.util.Log
@@ -28,6 +30,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -48,6 +51,8 @@ fun PlayerScreen(
     val context = LocalContext.current
     val currentVideo by viewModel.currentPlayingVideo.collectAsState()
     val hardwareAccel by viewModel.hardwareAccelerationEnabled.collectAsState()
+    val currentQueueIndex by viewModel.currentQueueIndex.collectAsState()
+    val playbackQueue by viewModel.playbackQueue.collectAsState()
 
     if (currentVideo == null) {
         LaunchedEffect(Unit) {
@@ -65,11 +70,26 @@ fun PlayerScreen(
         }
     }
 
+    var isLocked by remember { mutableStateOf(false) }
+    var showLockIconOnly by remember { mutableStateOf(false) }
+    var lockInteractionTrigger by remember { mutableIntStateOf(0) }
+
+    val resetLockTimeout = {
+        lockInteractionTrigger++
+    }
+
     // Handle back press to release player
     BackHandler {
-        exoPlayer.release()
-        viewModel.clearActivePlayback()
-        onBack()
+        if (isLocked) {
+            showLockIconOnly = true
+            resetLockTimeout()
+        } else {
+            exoPlayer.release()
+            viewModel.clearActivePlayback()
+            val activity = context as? Activity
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            onBack()
+        }
     }
 
     // Configure MediaItem when current video changes
@@ -114,9 +134,43 @@ fun PlayerScreen(
     var showControls by remember { mutableStateOf(true) }
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var selectedAspectRatio by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var aspectNotificationText by remember { mutableStateOf<String?>(null) }
+    var lastAspectNotificationText by remember { mutableStateOf("") }
     var isMuted by remember { mutableStateOf(false) }
     var activeSubtitles by remember { mutableStateOf(!video.subtitleUrlOrPath.isNullOrEmpty()) }
     var codecInfo by remember { mutableStateOf("Hardware (Auto)") }
+    var videoResolution by remember { mutableStateOf("Detecting...") }
+    val displayName = remember(video.urlOrPath, video.title) {
+        val cleanUrl = video.urlOrPath.substringBefore('?')
+        val lastSegment = cleanUrl.substringAfterLast('/')
+        if (lastSegment.isNotBlank() && lastSegment.contains('.')) {
+            lastSegment
+        } else {
+            video.title
+        }
+    }
+    var userInteractionTrigger by remember { mutableIntStateOf(0) }
+
+    val resetControlsTimeout = {
+        userInteractionTrigger++
+    }
+
+    // Lock screen floating icon autohide timer
+    LaunchedEffect(showLockIconOnly, lockInteractionTrigger) {
+        if (showLockIconOnly) {
+            delay(4000)
+            showLockIconOnly = false
+        }
+    }
+
+    // Aspect ratio notification autohide timer
+    LaunchedEffect(aspectNotificationText) {
+        if (aspectNotificationText != null) {
+            lastAspectNotificationText = aspectNotificationText!!
+            delay(1500)
+            aspectNotificationText = null
+        }
+    }
 
     // Periodically update progress from ExoPlayer
     LaunchedEffect(isPlaying) {
@@ -129,8 +183,8 @@ fun PlayerScreen(
         }
     }
 
-    // Control autohide logic
-    LaunchedEffect(showControls) {
+    // Control autohide logic (resets whenever showControls OR userInteractionTrigger changes)
+    LaunchedEffect(showControls, userInteractionTrigger) {
         if (showControls) {
             delay(4000)
             showControls = false
@@ -144,11 +198,25 @@ fun PlayerScreen(
 
     // Listeners for video events
     DisposableEffect(Unit) {
+        val activity = context as? Activity
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 duration = exoPlayer.duration.coerceAtLeast(0L)
                 if (state == Player.STATE_ENDED) {
                     viewModel.playNext()
+                }
+            }
+
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                val width = videoSize.width
+                val height = videoSize.height
+                if (width > 0 && height > 0) {
+                    videoResolution = "${width}x${height}"
+                    if (width > height) {
+                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    } else {
+                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    }
                 }
             }
 
@@ -160,6 +228,7 @@ fun PlayerScreen(
                             if (group.isTrackSelected(i)) {
                                 val format = group.getTrackFormat(i)
                                 codecInfo = "${format.sampleMimeType ?: "N/A"} (${format.width}x${format.height})"
+                                videoResolution = "${format.width}x${format.height}"
                             }
                         }
                     }
@@ -170,6 +239,7 @@ fun PlayerScreen(
         onDispose {
             exoPlayer.removeListener(listener)
             exoPlayer.release()
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -195,20 +265,34 @@ fun PlayerScreen(
             update = { view ->
                 view.resizeMode = selectedAspectRatio
             },
-            modifier = Modifier
-                .fillMaxSize()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) {
-                    showControls = !showControls
-                }
+            modifier = Modifier.fillMaxSize()
         )
+
+        // Transparent tap-target layer that is active when controls are hidden OR when screen is locked
+        if (!showControls || isLocked) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        if (isLocked) {
+                            showLockIconOnly = !showLockIconOnly
+                            if (showLockIconOnly) {
+                                resetLockTimeout()
+                            }
+                        } else {
+                            showControls = true
+                        }
+                    }
+            )
+        }
 
         // IMMERSIVE SUBTITLE LAYER (Native fallback subtitles displayed beautifully inside PlayerView by default)
         // Compose overlay controls
         AnimatedVisibility(
-            visible = showControls,
+            visible = showControls && !isLocked,
             enter = fadeIn(animationSpec = tween(300)),
             exit = fadeOut(animationSpec = tween(300))
         ) {
@@ -224,6 +308,12 @@ fun PlayerScreen(
                             )
                         )
                     )
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        showControls = false
+                    }
             ) {
                 // Top control Bar
                 Row(
@@ -234,7 +324,10 @@ fun PlayerScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         IconButton(
                             onClick = {
                                 exoPlayer.release()
@@ -250,28 +343,35 @@ fun PlayerScreen(
                             )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
-                        Column {
+                        Column(
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Text(
-                                text = video.title,
+                                text = displayName,
                                 color = androidx.compose.ui.graphics.Color.White,
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
-                                modifier = Modifier.widthIn(max = 200.dp)
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = if (video.isStream) "Live Stream • $codecInfo" else "Offline Copy • $codecInfo",
+                                text = if (video.isStream) "Live Stream • $videoResolution" else "Offline Copy • $videoResolution",
                                 color = androidx.compose.ui.graphics.Color.Gray,
-                                fontSize = 12.sp
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
+
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     // Top Actions
                     Row {
                         // Subtitle toggle
                         IconButton(
                             onClick = {
+                                resetControlsTimeout()
                                 activeSubtitles = !activeSubtitles
                                 val trackSelection = if (activeSubtitles) {
                                     TrackSelectionParameters.Builder(context).build()
@@ -291,7 +391,10 @@ fun PlayerScreen(
                         }
 
                         // Mute toggle
-                        IconButton(onClick = { isMuted = !isMuted }) {
+                        IconButton(onClick = {
+                            resetControlsTimeout()
+                            isMuted = !isMuted
+                        }) {
                             Icon(
                                 imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                                 contentDescription = "Mute",
@@ -302,7 +405,10 @@ fun PlayerScreen(
                         // Speed controller
                         var showSpeedMenu by remember { mutableStateOf(false) }
                         Box {
-                            IconButton(onClick = { showSpeedMenu = !showSpeedMenu }) {
+                            IconButton(onClick = {
+                                resetControlsTimeout()
+                                showSpeedMenu = !showSpeedMenu
+                            }) {
                                 Icon(
                                     imageVector = Icons.Default.Speed,
                                     contentDescription = "Speed",
@@ -317,6 +423,7 @@ fun PlayerScreen(
                                     DropdownMenuItem(
                                         text = { Text("${speed}x", color = MaterialTheme.colorScheme.onSurface) },
                                         onClick = {
+                                            resetControlsTimeout()
                                             playbackSpeed = speed
                                             exoPlayer.setPlaybackSpeed(speed)
                                             showSpeedMenu = false
@@ -328,15 +435,42 @@ fun PlayerScreen(
 
                         // Aspect ratio toggle
                         IconButton(onClick = {
+                            resetControlsTimeout()
                             selectedAspectRatio = when (selectedAspectRatio) {
-                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> {
+                                    aspectNotificationText = "Fill / Stretch"
+                                    AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                }
+                                AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
+                                    aspectNotificationText = "Zoom"
+                                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                }
+                                else -> {
+                                    aspectNotificationText = "Fit to Screen"
+                                    AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                }
                             }
                         }) {
                             Icon(
                                 imageVector = Icons.Default.AspectRatio,
                                 contentDescription = "Aspect Ratio",
+                                tint = androidx.compose.ui.graphics.Color.White
+                            )
+                        }
+
+                        // Lock Controls button
+                        IconButton(
+                            onClick = {
+                                isLocked = true
+                                showControls = false
+                                showLockIconOnly = true
+                                resetLockTimeout()
+                            },
+                            modifier = Modifier.testTag("player_lock_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LockOpen,
+                                contentDescription = "Lock Controls",
                                 tint = androidx.compose.ui.graphics.Color.White
                             )
                         }
@@ -348,19 +482,22 @@ fun PlayerScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.Center)
-                        .padding(horizontal = 48.dp),
+                        .padding(horizontal = 16.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .widthIn(max = 360.dp)
+                            .fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
                             onClick = {
+                                resetControlsTimeout()
                                 viewModel.playPrevious()
                             },
-                            enabled = viewModel.currentQueueIndex.value > 0,
+                            enabled = currentQueueIndex > 0,
                             modifier = Modifier
                                 .size(56.dp)
                                 .clip(CircleShape)
@@ -369,13 +506,14 @@ fun PlayerScreen(
                             Icon(
                                 imageVector = Icons.Default.SkipPrevious,
                                 contentDescription = "Prev Video",
-                                tint = if (viewModel.currentQueueIndex.value > 0) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.DarkGray,
+                                tint = if (currentQueueIndex > 0) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.DarkGray,
                                 modifier = Modifier.size(32.dp)
                             )
                         }
 
                         IconButton(
                             onClick = {
+                                resetControlsTimeout()
                                 val current = exoPlayer.currentPosition
                                 exoPlayer.seekTo((current - 10000).coerceAtLeast(0))
                             },
@@ -394,6 +532,7 @@ fun PlayerScreen(
 
                         IconButton(
                             onClick = {
+                                resetControlsTimeout()
                                 if (exoPlayer.isPlaying) {
                                     exoPlayer.pause()
                                 } else {
@@ -417,6 +556,7 @@ fun PlayerScreen(
 
                         IconButton(
                             onClick = {
+                                resetControlsTimeout()
                                 val current = exoPlayer.currentPosition
                                 val total = exoPlayer.duration
                                 exoPlayer.seekTo((current + 10000).coerceAtMost(total))
@@ -436,9 +576,10 @@ fun PlayerScreen(
 
                         IconButton(
                             onClick = {
+                                resetControlsTimeout()
                                 viewModel.playNext()
                             },
-                            enabled = viewModel.currentQueueIndex.value < viewModel.playbackQueue.value.size - 1,
+                            enabled = currentQueueIndex < playbackQueue.size - 1,
                             modifier = Modifier
                                 .size(56.dp)
                                 .clip(CircleShape)
@@ -447,7 +588,7 @@ fun PlayerScreen(
                             Icon(
                                 imageVector = Icons.Default.SkipNext,
                                 contentDescription = "Next Video",
-                                tint = if (viewModel.currentQueueIndex.value < viewModel.playbackQueue.value.size - 1) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.DarkGray,
+                                tint = if (currentQueueIndex < playbackQueue.size - 1) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.DarkGray,
                                 modifier = Modifier.size(32.dp)
                             )
                         }
@@ -489,6 +630,7 @@ fun PlayerScreen(
                     Slider(
                         value = sliderPos,
                         onValueChange = {
+                            resetControlsTimeout()
                             val target = (it * duration).toLong()
                             exoPlayer.seekTo(target)
                             currentPos = target
@@ -522,6 +664,64 @@ fun PlayerScreen(
                         )
                     }
                 }
+            }
+        }
+
+        // Top Action Bar when Locked (only displays Unlock button on the far right)
+        AnimatedVisibility(
+            visible = isLocked && showLockIconOnly,
+            enter = fadeIn(animationSpec = tween(300)),
+            exit = fadeOut(animationSpec = tween(300)),
+            modifier = Modifier.align(Alignment.TopCenter)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = {
+                        isLocked = false
+                        showControls = true
+                        showLockIconOnly = false
+                        resetControlsTimeout()
+                    },
+                    modifier = Modifier.testTag("player_unlock_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Unlock Controls",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = aspectNotificationText != null,
+            enter = fadeIn(animationSpec = tween(200)) + scaleIn(initialScale = 0.8f, animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(300)) + scaleOut(targetScale = 0.8f, animationSpec = tween(300)),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 72.dp, end = 24.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.75f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = lastAspectNotificationText,
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }

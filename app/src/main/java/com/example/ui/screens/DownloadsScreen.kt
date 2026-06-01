@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -38,31 +39,38 @@ fun DownloadsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp)
         ) {
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Header
-            Column {
-                Text(
-                    text = "Downloads",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Text(
-                    text = "Offline local video database copy cache",
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
+            Surface(
+                modifier = Modifier.fillMaxWidth().zIndex(1f),
+                shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 4.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp)
+                ) {
+                    Text(
+                        text = "Downloads",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Text(
+                        text = "Offline local video database copy cache",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                    )
+                }
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
 
             if (downloads.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
                         .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
@@ -93,24 +101,35 @@ fun DownloadsScreen(
                     }
                 }
             } else {
+                val completedDownloads = downloads.filter { it.downloadStatus == "COMPLETED" }
                 LazyColumn(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 80.dp)
+                    contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
                 ) {
                     items(downloads) { download ->
                         DownloadItemCard(
                             download = download,
                             onClick = {
                                 if (download.downloadStatus == "COMPLETED") {
-                                    val video = VideoModel(
+                                    val mapped = completedDownloads.map {
+                                        VideoModel(
+                                            id = "download_${it.id}",
+                                            title = it.title,
+                                            urlOrPath = it.localFilePath,
+                                            subtitleUrlOrPath = it.localSubtitlePath,
+                                            isOffline = true
+                                        )
+                                    }
+                                    val currentVideo = VideoModel(
                                         id = "download_${download.id}",
                                         title = download.title,
                                         urlOrPath = download.localFilePath,
                                         subtitleUrlOrPath = download.localSubtitlePath,
                                         isOffline = true
                                     )
-                                    viewModel.playVideo(video)
+                                    val idx = mapped.indexOfFirst { it.id == currentVideo.id }
+                                    viewModel.playPlaylist(mapped, if (idx != -1) idx else 0)
                                     onNavigateToPlayer()
                                 }
                             },
@@ -140,7 +159,7 @@ fun DownloadItemCard(
             containerColor = MaterialTheme.colorScheme.surface
         ),
         shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(
             modifier = Modifier

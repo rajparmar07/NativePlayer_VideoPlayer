@@ -13,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -23,6 +24,7 @@ import com.example.data.Playlist
 import com.example.data.PlaylistItem
 import com.example.data.VideoModel
 import com.example.viewmodel.VideoPlayerViewModel
+import com.example.ui.components.VideoThumbnail
 
 @Composable
 fun PlaylistScreen(
@@ -44,45 +46,51 @@ fun PlaylistScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 16.dp)
             ) {
-                Spacer(modifier = Modifier.height(16.dp))
-                // Header
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Surface(
+                    modifier = Modifier.fillMaxWidth().zIndex(1f),
+                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 4.dp
                 ) {
-                    Column {
-                        Text(
-                            text = "Playlists",
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        Text(
-                            text = "Create and organize video collections",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                        )
-                    }
-
-                    Button(
-                        onClick = { showCreateDialog = true },
-                        shape = RoundedCornerShape(12.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("New List")
+                        Column {
+                            Text(
+                                text = "Playlists",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Text(
+                                text = "Create and organize video collections",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                            )
+                        }
+
+                        Button(
+                            onClick = { showCreateDialog = true },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Add, contentDescription = null)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("New List")
+                        }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(16.dp))
 
                 if (playlists.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
                             .weight(1f),
                         contentAlignment = Alignment.Center
                     ) {
@@ -116,7 +124,7 @@ fun PlaylistScreen(
                     LazyColumn(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(bottom = 80.dp)
+                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
                     ) {
                         items(playlists) { playlist ->
                             PlaylistCard(
@@ -198,7 +206,8 @@ fun PlaylistCard(
             .clickable { onClick() }
             .testTag("playlist_card_${playlist.id}"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Row(
             modifier = Modifier
@@ -266,38 +275,44 @@ fun PlaylistDetailsView(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp)
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Navigation back
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+        Surface(
+            modifier = Modifier.fillMaxWidth().zIndex(1f),
+            shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 4.dp
         ) {
-            IconButton(onClick = onBack) {
-                Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Back")
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
-                Text(
-                    text = playlist.title,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "${items.size} videos",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp)
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Back")
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Text(
+                        text = playlist.title,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${items.size} videos",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                    )
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
         // Playlist Sequential Play actions
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Button(
@@ -341,6 +356,7 @@ fun PlaylistDetailsView(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
                     .weight(1f),
                 contentAlignment = Alignment.Center
             ) {
@@ -369,7 +385,7 @@ fun PlaylistDetailsView(
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 80.dp)
+                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
             ) {
                 items(items) { item ->
                     Card(
@@ -398,19 +414,26 @@ fun PlaylistDetailsView(
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(
+                            VideoThumbnail(
+                                videoPath = item.urlOrPath,
                                 modifier = Modifier
                                     .size(48.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(MaterialTheme.colorScheme.primaryContainer),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = if (item.urlOrPath.contains(".m3u8")) Icons.Default.LiveTv else Icons.Default.PlayCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
+                                    .clip(RoundedCornerShape(6.dp)),
+                                placeholder = {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .background(MaterialTheme.colorScheme.primaryContainer),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (item.urlOrPath.contains(".m3u8")) Icons.Default.LiveTv else Icons.Default.PlayCircle,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                }
+                            )
 
                             Spacer(modifier = Modifier.width(16.dp))
 
@@ -421,8 +444,25 @@ fun PlaylistDetailsView(
                                     fontSize = 14.sp
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
+                                val displayPath = remember(item.urlOrPath) {
+                                    if (item.urlOrPath.contains(".m3u8")) {
+                                        "Live Stream (.m3u8)"
+                                    } else {
+                                        val cleanPath = item.urlOrPath.substringBeforeLast('/', "")
+                                        if (cleanPath.isNotEmpty()) {
+                                            val index = cleanPath.indexOf("/0/")
+                                            if (index != -1) {
+                                                cleanPath.substring(index + 3).ifEmpty { "Internal Storage" }
+                                            } else {
+                                                cleanPath
+                                            }
+                                        } else {
+                                            "Internal Storage"
+                                        }
+                                    }
+                                }
                                 Text(
-                                    text = if (item.urlOrPath.contains(".m3u8")) "Live Stream (.m3u8)" else item.urlOrPath,
+                                    text = displayPath,
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                                     maxLines = 1

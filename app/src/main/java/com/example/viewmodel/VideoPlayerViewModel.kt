@@ -8,7 +8,25 @@ import com.example.data.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-class VideoPlayerViewModel(private val repository: VideoRepository) : ViewModel() {
+enum class AppTheme {
+    Light, Dark, System
+}
+
+class VideoPlayerViewModel(
+    private val repository: VideoRepository,
+    context: Context
+) : ViewModel() {
+    private val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+
+    private val _appTheme = MutableStateFlow(
+        AppTheme.valueOf(prefs.getString("app_theme", AppTheme.System.name) ?: AppTheme.System.name)
+    )
+    val appTheme: StateFlow<AppTheme> = _appTheme.asStateFlow()
+
+    fun setAppTheme(theme: AppTheme) {
+        _appTheme.value = theme
+        prefs.edit().putString("app_theme", theme.name).apply()
+    }
 
     // Local Videos State
     private val _localVideos = MutableStateFlow<List<VideoModel>>(emptyList())
@@ -134,11 +152,14 @@ class VideoPlayerViewModel(private val repository: VideoRepository) : ViewModel(
     }
 }
 
-class VideoPlayerViewModelFactory(private val repository: VideoRepository) : ViewModelProvider.Factory {
+class VideoPlayerViewModelFactory(
+    private val repository: VideoRepository,
+    private val context: Context
+) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(VideoPlayerViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return VideoPlayerViewModel(repository) as T
+            return VideoPlayerViewModel(repository, context.applicationContext) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
