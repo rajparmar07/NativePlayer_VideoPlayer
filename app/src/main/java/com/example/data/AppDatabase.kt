@@ -81,6 +81,9 @@ interface VideoPlayerDao {
     @Query("SELECT * FROM video_downloads WHERE sourceUrl = :sourceUrl LIMIT 1")
     suspend fun getDownloadByUrl(sourceUrl: String): VideoDownload?
 
+    @Query("SELECT * FROM video_downloads WHERE localFilePath = :localFilePath LIMIT 1")
+    suspend fun getDownloadByFilePath(localFilePath: String): VideoDownload?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDownload(download: VideoDownload): Long
 

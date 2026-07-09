@@ -11,7 +11,7 @@ android {
   namespace = "com.example"
 
   // FIXED: Reverted to standard stable syntax compatible with Gradle 8.6
-  compileSdk = 34
+  compileSdk = 35
 
   defaultConfig {
     applicationId = "com.aistudio.videoplayer.gjpqrw"
@@ -44,11 +44,19 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      // R8 minification: removes unused code (esp. all unused Material icons)
+      // and shrinks resources. Reduces installed size from ~85MB → ~25-30MB.
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
+      // Only build for arm64-v8a during development — speeds up builds and
+      // reduces the debug APK size. All modern test devices are arm64.
+      ndk {
+        abiFilters += setOf("arm64-v8a")
+      }
 //      signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
@@ -95,6 +103,7 @@ dependencies {
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
   implementation(libs.androidx.media3.exoplayer.hls)
+  implementation(libs.jellyfin.media3.ffmpeg)
   implementation(libs.converter.moshi)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)

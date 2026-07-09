@@ -38,6 +38,8 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Constraints
@@ -51,6 +53,8 @@ import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
 import com.example.ui.components.VideoThumbnail
+import com.example.ui.components.rememberVideoResolution
+
 
 @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -63,9 +67,11 @@ fun LocalLibraryScreen(
     val localVideos by viewModel.localVideos.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
+    val resumeEnabled by viewModel.resumeFromLastLeftEnabled.collectAsState()
+    val videoProgressMap by viewModel.videoProgressMap.collectAsState()
 
-    var selectedFolder by remember { mutableStateOf<String?>(null) }
-    var isGridView by remember { mutableStateOf(false) }
+    val selectedFolder by viewModel.selectedFolder.collectAsState()
+    val isGridView by viewModel.isGridView.collectAsState()
     var isSearchingMode by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
@@ -80,9 +86,9 @@ fun LocalLibraryScreen(
 
     val permissionState = rememberPermissionState(permission = permissionType)
 
-    // Scan videos automatically when permission is granted
+    // Scan videos automatically when permission is granted and localVideos list is empty
     LaunchedEffect(permissionState.status.isGranted) {
-        if (permissionState.status.isGranted) {
+        if (permissionState.status.isGranted && localVideos.isEmpty()) {
             viewModel.scanLocalVideos(context)
         }
     }
@@ -115,7 +121,7 @@ fun LocalLibraryScreen(
 
     // Intercept back press in folder details view
     BackHandler(enabled = selectedFolder != null && !isSearchingMode) {
-        selectedFolder = null
+        viewModel.setSelectedFolder(null)
     }
 
     var showPlaylistDialog by remember { mutableStateOf<VideoModel?>(null) }
@@ -237,10 +243,14 @@ fun LocalLibraryScreen(
                         verticalArrangement = Arrangement.spacedBy(0.dp),
                         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
                     ) {
-                        items(filteredVideos) { video ->
+                        items(filteredVideos, key = { it.id }) { video ->
+                            val progressData = videoProgressMap[video.urlOrPath]
                             LocalVideoCard(
                                 video = video,
                                 searchQuery = searchQuery,
+                                resumeEnabled = resumeEnabled,
+                                progressMs = progressData?.first ?: 0L,
+                                durationMs = progressData?.second ?: video.duration,
                                 onPlay = {
                                     val idx = filteredVideos.indexOf(video)
                                     viewModel.playPlaylist(filteredVideos, idx)
@@ -277,7 +287,7 @@ fun LocalLibraryScreen(
                         ) {
                             if (selectedFolder != null) {
                                 IconButton(
-                                    onClick = { selectedFolder = null },
+                                    onClick = { viewModel.setSelectedFolder(null) },
                                     modifier = Modifier.testTag("back_to_folders_button")
                                 ) {
                                     Icon(
@@ -297,9 +307,11 @@ fun LocalLibraryScreen(
                                 )
                                 Text(
                                     text = if (selectedFolder != null) {
-                                        "${groupedVideos[selectedFolder]?.size ?: 0} videos in folder"
+                                        val count = groupedVideos[selectedFolder]?.size ?: 0
+                                        if (count == 1) "1 video in folder" else "$count videos in folder"
                                     } else {
-                                        "Scanned videos on your device"
+                                        val count = localVideos.size
+                                        if (count == 1) "1 video on device" else "$count videos on device"
                                     },
                                     fontSize = 14.sp,
                                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
@@ -314,7 +326,7 @@ fun LocalLibraryScreen(
                         ) {
                             // Layout Switcher (Always visible in folder overview and video lists)
                             IconButton(
-                                onClick = { isGridView = !isGridView },
+                                onClick = { viewModel.setGridView(!isGridView) },
                                 modifier = Modifier
                                     .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
                                     .testTag("toggle_layout_button")
@@ -390,7 +402,7 @@ fun LocalLibraryScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
+                            .padding(horizontal = 10.dp)
                             .weight(1f),
                         contentAlignment = Alignment.Center
                     ) {
@@ -408,7 +420,7 @@ fun LocalLibraryScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
+                            .padding(horizontal = 10.dp)
                             .weight(1f),
                         contentAlignment = Alignment.Center
                     ) {
@@ -475,45 +487,46 @@ fun LocalLibraryScreen(
                                         modifier = Modifier.fillMaxSize(),
                                         verticalArrangement = Arrangement.spacedBy(12.dp),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
+                                        contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
                                     ) {
-                                        items(folderList) { f ->
+                                        items(folderList, key = { it }) { f ->
                                             val videoCount = groupedVideos[f]?.size ?: 0
                                             FolderGridCard(
                                                 folderName = f,
                                                 videoCount = videoCount,
-                                                onClick = { selectedFolder = f }
+                                                onClick = { viewModel.setSelectedFolder(f) }
                                             )
                                         }
                                     }
                                 } else {
                                     LazyColumn(
                                         modifier = Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                                        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
+                                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                                        contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
                                     ) {
-                                        items(folderList) { f ->
+                                        items(folderList, key = { it }) { f ->
                                             val videosInFolder = groupedVideos[f] ?: emptyList()
                                             val videoCount = videosInFolder.size
                                             val folderPath = remember(videosInFolder) {
                                                 if (videosInFolder.isNotEmpty()) {
                                                     val file = File(videosInFolder.first().urlOrPath)
-                                                    val cleanPath = file.parentFile?.absolutePath ?: "Internal Storage"
-                                                    val index = cleanPath.indexOf("/0/")
-                                                    if (index != -1) {
-                                                        cleanPath.substring(index + 3)
-                                                    } else {
-                                                        cleanPath
-                                                    }
+                                                    file.parentFile?.parentFile?.absolutePath ?: "/storage/emulated/0"
                                                 } else {
-                                                    "Internal Storage"
+                                                    "/storage/emulated/0"
                                                 }
+                                            }
+                                            val totalDurationMs = remember(videosInFolder) {
+                                                videosInFolder.sumOf { it.duration }
+                                            }
+                                            val totalDurationText = remember(totalDurationMs) {
+                                                formatTotalDuration(totalDurationMs)
                                             }
                                             FolderCard(
                                                 folderName = f,
                                                 folderPath = folderPath,
                                                 videoCount = videoCount,
-                                                onClick = { selectedFolder = f }
+                                                totalDurationText = totalDurationText,
+                                                onClick = { viewModel.setSelectedFolder(f) }
                                             )
                                         }
                                     }
@@ -541,9 +554,13 @@ fun LocalLibraryScreen(
                                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                                         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
                                     ) {
-                                        items(videosInFolder) { video ->
+                                        items(videosInFolder, key = { it.id }) { video ->
+                                            val progressData = videoProgressMap[video.urlOrPath]
                                             LocalVideoGridCard(
                                                 video = video,
+                                                resumeEnabled = resumeEnabled,
+                                                progressMs = progressData?.first ?: 0L,
+                                                durationMs = progressData?.second ?: video.duration,
                                                 onPlay = {
                                                     val idx = videosInFolder.indexOf(video)
                                                     viewModel.playPlaylist(videosInFolder, idx)
@@ -561,9 +578,13 @@ fun LocalLibraryScreen(
                                         verticalArrangement = Arrangement.spacedBy(0.dp),
                                         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
                                     ) {
-                                        items(videosInFolder) { video ->
+                                        items(videosInFolder, key = { it.id }) { video ->
+                                            val progressData = videoProgressMap[video.urlOrPath]
                                             LocalVideoCard(
                                                 video = video,
+                                                resumeEnabled = resumeEnabled,
+                                                progressMs = progressData?.first ?: 0L,
+                                                durationMs = progressData?.second ?: video.duration,
                                                 onPlay = {
                                                     val idx = videosInFolder.indexOf(video)
                                                     viewModel.playPlaylist(videosInFolder, idx)
@@ -625,7 +646,7 @@ fun LocalLibraryScreen(
                         LazyColumn(
                             modifier = Modifier.heightIn(max = 240.dp)
                         ) {
-                            items(playlists) { playlist ->
+                            items(playlists, key = { it.id }) { playlist ->
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -675,46 +696,62 @@ fun FolderCard(
     folderName: String,
     folderPath: String,
     videoCount: Int,
+    totalDurationText: String,
     onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
-            .padding(horizontal = 4.dp, vertical = 5.dp)
+            .padding(horizontal = 8.dp, vertical = 8.dp)
             .testTag("folder_card_$folderName"),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Image(
             painter = painterResource(id = R.drawable.ic_folder_video),
             contentDescription = null,
-            contentScale = ContentScale.FillBounds,
-            modifier = Modifier.size(120.dp, 85.dp)
-
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.size(100.dp, 70.dp)
         )
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = folderName,
-                    fontWeight = FontWeight.Bold,
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .align(Alignment.CenterVertically),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = folderName,
+                color = MaterialTheme.colorScheme.onSurface,
+                overflow = TextOverflow.Ellipsis,
+                maxLines = 2,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
-                    color = MaterialTheme.colorScheme.onSurface
+                    lineHeight = 20.sp,
+                    lineBreak = LineBreak.Paragraph
                 )
-                Text(
-                    text = " • $videoCount Videos",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            }
-            Spacer(modifier = Modifier.height(2.dp))
+            )
             Text(
                 text = folderPath,
-                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                maxLines = 1
+                overflow = TextOverflow.Ellipsis,
+                maxLines = 2,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    lineBreak = LineBreak.Paragraph
+                )
+            )
+            val videoText = if (videoCount == 1) "1 Video" else "$videoCount Videos"
+            Text(
+                text = "$videoText • $totalDurationText",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineBreak = LineBreak.Paragraph
+                )
             )
         }
     }
@@ -729,59 +766,61 @@ fun FolderGridCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp).clickable { onClick() },
+            .padding(8.dp)
+            .clickable { onClick() },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Image(
             painter = painterResource(id = R.drawable.ic_folder_video),
             contentDescription = null,
-            contentScale = ContentScale.FillBounds,
+            contentScale = ContentScale.Fit,
             modifier = Modifier.size(80.dp, 55.dp)
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = folderName,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 15.sp,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
-            lineHeight = 16.sp
+            style = MaterialTheme.typography.titleSmall.copy(
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                lineHeight = 16.sp,
+                lineBreak = LineBreak.Paragraph
+            )
         )
         Spacer(modifier = Modifier.height(4.dp))
+        val videoText = if (videoCount == 1) "1 Video" else "$videoCount Videos"
         Text(
-            text = "$videoCount Videos",
-            fontSize = 11.sp,
+            text = videoText,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             textAlign = TextAlign.Center,
-            lineHeight = 16.sp
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+                lineBreak = LineBreak.Paragraph
+            )
         )
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LocalVideoCard(
     video: VideoModel,
     searchQuery: String = "",
+    resumeEnabled: Boolean = false,
+    progressMs: Long = 0L,
+    durationMs: Long = 0L,
     onPlay: () -> Unit,
     onAddToPlaylist: () -> Unit
 ) {
     val file = remember(video.urlOrPath) { File(video.urlOrPath) }
     val extension = remember(file) { file.extension.uppercase().ifEmpty { "VID" } }
-    val displayPath = remember(video.urlOrPath) {
-        val path = video.urlOrPath
-        val cleanPath = path.substringBeforeLast('/', "")
-        if (cleanPath.isNotEmpty()) {
-            val index = cleanPath.indexOf("/0/")
-            if (index != -1) {
-                cleanPath.substring(index + 3).ifEmpty { "Internal Storage" }
-            } else {
-                cleanPath
-            }
-        } else {
-            "Internal Storage"
-        }
+    val displayPath = remember(file) {
+        file.parentFile?.parentFile?.absolutePath ?: "/storage/emulated/0"
     }
 
     val cleanTitle = remember(video.title) { video.title.substringBeforeLast('.') }
@@ -796,151 +835,172 @@ fun LocalVideoCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp, horizontal = 4.dp),
+                .padding(vertical = 8.dp, horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Media thumbnail
-            VideoThumbnail(
-                videoPath = video.urlOrPath,
+            Box(
                 modifier = Modifier
                     .size(120.dp, 80.dp)
-                    .clip(RoundedCornerShape(8.dp)),
-                placeholder = {
+                    .clip(RoundedCornerShape(8.dp))
+            ) {
+                VideoThumbnail(
+                    videoPath = video.urlOrPath,
+                    modifier = Modifier.fillMaxSize(),
+                    placeholder = {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                )
+
+                val resolution = rememberVideoResolution(video)
+                if (!resolution.isNullOrEmpty()) {
                     Box(
                         modifier = Modifier
-                            .size(120.dp, 80.dp)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center
+                            .align(Alignment.TopStart)
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.PlayCircle,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(32.dp)
+                        Text(
+                            text = resolution,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            lineHeight = 7.sp
                         )
                     }
                 }
-            )
 
-            Spacer(modifier = Modifier.width(12.dp))
+                if (resumeEnabled && progressMs > 0L) {
+                    val progressRatio = if (durationMs > 0) (progressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                    if (progressRatio > 0f) {
+                        LinearProgressIndicator(
+                            progress = progressRatio,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .align(Alignment.BottomCenter)
+                                .testTag("video_progress_indicator_${video.id}"),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.width(10.dp))
 
             Column(
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .weight(1f)
+                    .align(Alignment.CenterVertically),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 MiddleEllipsisText(
                     text = cleanTitle,
                     modifier = Modifier.fillMaxWidth(),
-                    style = TextStyle(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 20.sp,
+                        lineBreak = LineBreak.Paragraph
                     ),
                     maxLines = 1,
                     searchQuery = searchQuery,
                     highlightColor = highlightColor
                 )
                 
-                Spacer(modifier = Modifier.height(1.dp))
-                
                 MiddleEllipsisText(
                     text = displayPath,
                     modifier = Modifier.fillMaxWidth(),
-                    style = TextStyle(
+                    style = MaterialTheme.typography.bodySmall.copy(
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        lineHeight = 16.sp,
+                        lineBreak = LineBreak.Paragraph
                     ),
                     maxLines = 2
                 )
 
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.Center,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.weight(1f)
+                    // Format box (extension)
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterVertically)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        // Format box (extension)
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.primary)
-                                .padding(horizontal = 6.dp, vertical = 4.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = extension,
-                                fontSize = 7.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                lineHeight = 7.sp
-                            )
-                        }
-
                         Text(
-                            text = "•",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                        )
-                        Text(
-                            text = formatDuration(video.duration),
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                        Text(
-                            text = "•",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                        )
-                        Text(
-                            text = formatSize(video.size),
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            text = extension,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            lineHeight = 7.sp
                         )
                     }
 
-                    IconButton(
-                        onClick = onAddToPlaylist,
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PlaylistAdd,
-                            contentDescription = "Add to playlist",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                    Text(
+                        text = "•",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    Text(
+                        text = formatDuration(video.duration),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    Text(
+                        text = "•",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    Text(
+                        text = formatSize(video.size),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
                 }
             }
         }
-        
-        // Divider removed for a flat clean look
     }
 }
 
 @Composable
 fun LocalVideoGridCard(
     video: VideoModel,
+    resumeEnabled: Boolean = false,
+    progressMs: Long = 0L,
+    durationMs: Long = 0L,
     onPlay: () -> Unit,
     onAddToPlaylist: () -> Unit
 ) {
     val file = remember(video.urlOrPath) { File(video.urlOrPath) }
     val extension = remember(file) { file.extension.uppercase().ifEmpty { "VID" } }
-    val displayPath = remember(video.urlOrPath) {
-        val path = video.urlOrPath
-        val cleanPath = path.substringBeforeLast('/', "")
-        if (cleanPath.isNotEmpty()) {
-            val index = cleanPath.indexOf("/0/")
-            if (index != -1) {
-                cleanPath.substring(index + 3).ifEmpty { "Internal Storage" }
-            } else {
-                cleanPath
-            }
-        } else {
-            "Internal Storage"
-        }
+    val displayPath = remember(file) {
+        file.parentFile?.parentFile?.absolutePath ?: "/storage/emulated/0"
     }
 
     Card(
@@ -997,79 +1057,109 @@ fun LocalVideoGridCard(
                     )
                 }
 
-                // Overlay extension on top left of the thumbnail
-                Box(
+                // Overlay extension & resolution on top left of the thumbnail
+                Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(MaterialTheme.colorScheme.primary)
-                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        text = extension,
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        lineHeight = 7.sp
-                    )
-                }
-            }
-
-            Column(modifier = Modifier.padding(12.dp)) {
-                val cleanTitle = remember(video.title) { video.title.substringBeforeLast('.') }
-                MiddleEllipsisText(
-                    text = cleanTitle,
-                    modifier = Modifier.fillMaxWidth(),
-                    style = TextStyle(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    maxLines = 1
-                )
-                
-                Spacer(modifier = Modifier.height(1.dp))
-                
-                MiddleEllipsisText(
-                    text = displayPath,
-                    modifier = Modifier.fillMaxWidth(),
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    ),
-                    maxLines = 1
-                )
-                
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = formatSize(video.size),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-
-                    IconButton(
-                        onClick = onAddToPlaylist,
-                        modifier = Modifier.size(24.dp)
+                    // Video type (extension) badge
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.PlaylistAdd,
-                            contentDescription = "Add to playlist",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
+                        Text(
+                            text = extension,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            lineHeight = 7.sp
+                        )
+                    }
+
+                    // Resolution badge
+                    val resolution = rememberVideoResolution(video)
+                    if (!resolution.isNullOrEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = resolution,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                lineHeight = 7.sp
+                            )
+                        }
+                    }
+                }
+
+                if (resumeEnabled && progressMs > 0L) {
+                    val progressRatio = if (durationMs > 0) (progressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                    if (progressRatio > 0f) {
+                        LinearProgressIndicator(
+                            progress = progressRatio,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .align(Alignment.BottomCenter)
+                                .testTag("video_progress_indicator_${video.id}"),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
                         )
                     }
                 }
             }
+
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)) {
+                val cleanTitle = remember(video.title) { video.title.substringBeforeLast('.') }
+                MiddleEllipsisText(
+                    text = cleanTitle,
+                    modifier = Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 16.sp,
+                    ),
+                    maxLines = 1
+                )
+                
+                Spacer(modifier = Modifier.height(3.dp))
+                
+                MiddleEllipsisText(
+                    text = displayPath,
+                    modifier = Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        lineHeight = 14.sp,
+                    ),
+                    maxLines = 1
+                )
+                
+                Spacer(modifier = Modifier.height(3.dp))
+
+                Text(
+                    text = formatSize(video.size),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        lineHeight = 14.sp,
+                    )
+                )
+            }
         }
     }
 }
+
+
 
 fun highlightSearchText(text: String, query: String, highlightColor: Color): AnnotatedString {
     return buildAnnotatedString {
@@ -1104,76 +1194,35 @@ fun MiddleEllipsisText(
     searchQuery: String = "",
     highlightColor: Color = Color.Unspecified
 ) {
-    val textMeasurer = rememberTextMeasurer()
-    val mergedStyle = LocalTextStyle.current.merge(style)
-    val density = LocalDensity.current
+    val mergedStyle = LocalTextStyle.current.merge(style).copy(
+        lineBreak = LineBreak.Paragraph
+    )
 
-    BoxWithConstraints(modifier = modifier) {
-        val safetyBufferPx = with(density) { 2.dp.toPx() }.toInt()
-        val maxWidthPx = (constraints.maxWidth - safetyBufferPx).coerceAtLeast(0)
-
-        val annotatedText = remember(text, mergedStyle, maxLines, maxWidthPx, searchQuery, highlightColor) {
-            val ellipsis = "..."
-
-            val initialAnnotated = if (searchQuery.isNotEmpty() && highlightColor != Color.Unspecified) {
-                highlightSearchText(text, searchQuery, highlightColor)
-            } else {
-                AnnotatedString(text)
-            }
-
-            val fullLayout = textMeasurer.measure(
-                text = initialAnnotated,
-                style = mergedStyle,
-                constraints = Constraints(maxWidth = maxWidthPx),
-                maxLines = maxLines,
-                softWrap = maxLines > 1
-            )
-
-            if (!fullLayout.hasVisualOverflow) {
-                return@remember initialAnnotated
-            }
-
-            var low = 0
-            var high = text.length
-            var bestFit = AnnotatedString(ellipsis)
-
-            while (low <= high) {
-                val mid = (low + high) / 2
-                val keepStart = mid / 2
-                val keepEnd = mid - keepStart
-                val candidate = text.take(keepStart) + ellipsis + text.takeLast(keepEnd)
-
-                val annotatedCandidate = if (searchQuery.isNotEmpty() && highlightColor != Color.Unspecified) {
-                    highlightSearchText(candidate, searchQuery, highlightColor)
-                } else {
-                    AnnotatedString(candidate)
-                }
-
-                val layout = textMeasurer.measure(
-                    text = annotatedCandidate,
-                    style = mergedStyle,
-                    constraints = Constraints(maxWidth = maxWidthPx),
-                    maxLines = maxLines,
-                    softWrap = maxLines > 1
-                )
-
-                if (!layout.hasVisualOverflow) {
-                    bestFit = annotatedCandidate
-                    low = mid + 1
-                } else {
-                    high = mid - 1
-                }
-            }
-            bestFit
+    val processedText = remember(text, maxLines) {
+        // Efficient string middle-truncation heuristic (avoids expensive measurements)
+        if (maxLines == 1 && text.length > 35) {
+            text.take(16) + "..." + text.takeLast(16)
+        } else {
+            text
         }
-
-        Text(
-            text = annotatedText,
-            style = mergedStyle,
-            maxLines = maxLines,
-            softWrap = maxLines > 1
-        )
     }
+
+    val annotatedText = remember(processedText, searchQuery, highlightColor) {
+        if (searchQuery.isNotEmpty() && highlightColor != Color.Unspecified) {
+            highlightSearchText(processedText, searchQuery, highlightColor)
+        } else {
+            AnnotatedString(processedText)
+        }
+    }
+
+    Text(
+        text = annotatedText,
+        modifier = modifier,
+        style = mergedStyle,
+        maxLines = maxLines,
+        overflow = TextOverflow.Ellipsis,
+        softWrap = maxLines > 1
+    )
 }
 
 private fun formatDuration(ms: Long): String {
@@ -1186,6 +1235,14 @@ private fun formatDuration(ms: Long): String {
     } else {
         String.format("%02d:%02d", minutes, seconds)
     }
+}
+
+private fun formatTotalDuration(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val seconds = totalSeconds % 60
+    val minutes = (totalSeconds / 60) % 60
+    val hours = totalSeconds / 3600
+    return String.format("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
 fun formatSize(bytes: Long): String {

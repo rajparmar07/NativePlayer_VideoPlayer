@@ -72,7 +72,25 @@ class VideoRepository(private val dao: VideoPlayerDao) {
         }
     }
 
-    suspend fun startDownload(context: Context, title: String, videoUrl: String, subtitleUrl: String? = null) {
+    suspend fun deleteDownloadByFilePath(filePath: String) {
+        val download = dao.getDownloadByFilePath(filePath)
+        if (download != null) {
+            deleteDownload(download.id)
+        } else {
+            val file = File(filePath)
+            if (file.exists()) {
+                file.delete()
+            }
+        }
+    }
+
+    suspend fun startDownload(
+        context: Context,
+        title: String,
+        videoUrl: String,
+        subtitleUrl: String? = null,
+        destinationPath: String? = null
+    ) {
         withContext(Dispatchers.IO) {
             // Check if already in progress
             val existing = dao.getDownloadByUrl(videoUrl)
@@ -80,8 +98,12 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                 return@withContext
             }
 
-            val filename = "vid_${System.currentTimeMillis()}.mp4"
-            val destFile = File(context.filesDir, filename)
+            val destFile = if (destinationPath != null) {
+                File(destinationPath)
+            } else {
+                val filename = "vid_${System.currentTimeMillis()}.mp4"
+                File(context.filesDir, filename)
+            }
 
             val downloadId = dao.insertDownload(
                 VideoDownload(
@@ -205,7 +227,8 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                 MediaStore.Video.Media.DISPLAY_NAME,
                 MediaStore.Video.Media.DATA,
                 MediaStore.Video.Media.DURATION,
-                MediaStore.Video.Media.SIZE
+                MediaStore.Video.Media.SIZE,
+                MediaStore.Video.Media.RESOLUTION
             )
 
             val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
@@ -223,6 +246,7 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                     val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
                     val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
                     val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+                    val resolutionColumn = cursor.getColumnIndex(MediaStore.Video.Media.RESOLUTION)
 
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idColumn).toString()
@@ -230,6 +254,9 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                         val path = cursor.getString(dataColumn)
                         val duration = cursor.getLong(durationColumn)
                         val size = cursor.getLong(sizeColumn)
+                        
+                        val rawResolution = if (resolutionColumn != -1) cursor.getString(resolutionColumn) else null
+                        val parsedResolution = VideoModel.parseResolutionLabel(rawResolution)
 
                         videosList.add(
                             VideoModel(
@@ -238,7 +265,8 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                                 urlOrPath = path,
                                 duration = duration,
                                 size = size,
-                                isLocal = true
+                                isLocal = true,
+                                resolution = parsedResolution
                             )
                         )
                     }

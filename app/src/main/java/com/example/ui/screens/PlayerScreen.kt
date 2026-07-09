@@ -1,18 +1,42 @@
 package com.example.ui.screens
 
 import android.app.Activity
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Color
+import android.media.AudioManager
 import android.net.Uri
 import android.util.Log
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.OrientationEventListener
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
-import androidx.annotation.OptIn
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import kotlin.OptIn
 import androidx.compose.animation.*
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -24,7 +48,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -36,13 +65,81 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.*
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.CaptionStyleCompat
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Memory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.OpenableColumns
+import android.content.Intent
 import com.example.viewmodel.VideoPlayerViewModel
+import com.example.viewmodel.SubtitleStyle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.sqrt
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.*
 
-@OptIn(androidx.media3.common.util.UnstableApi::class)
+// ─── Gesture control constants ───────────────────────────────────────────────
+private const val SEEK_PIXELS_PER_STEP   = 60     // pixels of drag per seek step
+private const val BRIGHTNESS_SENSITIVITY = 0.0015f // brightness change per pixel (reduced for comfort)
+private const val VOLUME_PIXELS_PER_STEP = 1000    // pixels of drag per system volume step (increased for comfort)
+private const val GESTURE_HUD_HIDE_DELAY = 800L   // ms before HUD fades after drag ends
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Gesture zones active during video playback. Locked in at drag-start, never changes mid-gesture. */
+private enum class GestureType { BRIGHTNESS, VOLUME, SEEK }
+
+data class SubtitleTrackInfo(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val format: Format,
+    val isSelected: Boolean
+)
+
+data class AudioTrackInfo(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val format: Format,
+    val isSelected: Boolean
+)
+
+private fun getFileName(context: Context, uri: Uri): String {
+    var result: String? = null
+    if (uri.scheme == "content") {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        try {
+            if (cursor != null && cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index != -1) {
+                    result = cursor.getString(index)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("PlayerScreen", "Failed to query filename", e)
+        } finally {
+            cursor?.close()
+        }
+    }
+    if (result == null) {
+        result = uri.path
+        val cut = result?.lastIndexOf('/') ?: -1
+        if (cut != -1) {
+            result = result?.substring(cut + 1)
+        }
+    }
+    return result ?: "subtitle.srt"
+}
+
+@OptIn(
+    androidx.media3.common.util.UnstableApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class
+)
 @Composable
 fun PlayerScreen(
     viewModel: VideoPlayerViewModel,
@@ -53,6 +150,73 @@ fun PlayerScreen(
     val hardwareAccel by viewModel.hardwareAccelerationEnabled.collectAsState()
     val currentQueueIndex by viewModel.currentQueueIndex.collectAsState()
     val playbackQueue by viewModel.playbackQueue.collectAsState()
+    val isInPipMode by viewModel.isInPipMode.collectAsState()
+    val subtitleStyle by viewModel.subtitleStyle.collectAsState()
+    var scale by remember { mutableFloatStateOf(1f) }
+
+    // Fast Seek & 4K HEVC Override logic
+    var is4kHevcVideo by remember { mutableStateOf(false) }
+    val fastSeekGlobal by viewModel.fastSeekEnabled.collectAsState()
+    val activeFastSeek = fastSeekGlobal || is4kHevcVideo
+    var isSliderDragging by remember { mutableStateOf(false) }
+
+    var externalSubtitleUri by remember { mutableStateOf<Uri?>(null) }
+    var showSubtitleDialog by remember { mutableStateOf(false) }
+    var showNoSubtitlesPrompt by remember { mutableStateOf(false) }
+    var selectedSubtitleGroupIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedSubtitleTrackIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedAudioGroupIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedAudioTrackIndex by remember { mutableStateOf<Int?>(null) }
+    var isSubtitleDisabled by remember { mutableStateOf(true) }
+
+    var playbackErrorMsg by remember { mutableStateOf<String?>(null) }
+    var snackbarMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(snackbarMessage) {
+        if (snackbarMessage != null) {
+            delay(3000L)
+            snackbarMessage = null
+        }
+    }
+    var subtitleTracks by remember { mutableStateOf<List<SubtitleTrackInfo>>(emptyList()) }
+    var lastVideoUrl by remember { mutableStateOf("") }
+
+    var isLoading by remember { mutableStateOf(true) }
+    var showAudioTrackDialog by remember { mutableStateOf(false) }
+    var showDecoderDialog by remember { mutableStateOf(false) }
+    var audioTracks by remember { mutableStateOf<List<AudioTrackInfo>>(emptyList()) }
+    var decoderNotificationText by remember { mutableStateOf<String?>(null) }
+    var lastDecoderNotificationText by remember { mutableStateOf("") }
+
+    var showOrientationSuggestion by remember { mutableStateOf(false) }
+    var suggestedTargetOrientation by remember { mutableIntStateOf(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) }
+    var orientationSuggestionTrigger by remember { mutableIntStateOf(0) }
+    var lastPhysicalOrientation by remember { mutableStateOf(DeviceOrientation.UNKNOWN) }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    Log.e("PlayerScreen", "Failed to take persistable URI permission", e)
+                }
+                externalSubtitleUri = uri
+            }
+        }
+    )
+
+    val openFilePicker = {
+        try {
+            filePickerLauncher.launch(arrayOf("*/*"))
+        } catch (e: Exception) {
+            snackbarMessage = "Error opening file picker"
+        }
+    }
 
     if (currentVideo == null) {
         LaunchedEffect(Unit) {
@@ -63,11 +227,43 @@ fun PlayerScreen(
 
     val video = currentVideo!!
 
-    // Initialize ExoPlayer
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            playWhenReady = true
+    // Initialize ExoPlayer (recreated when hardwareAccel changes to reload rendering pipeline)
+    val exoPlayer = remember(hardwareAccel) {
+        val renderersFactory = object : DefaultRenderersFactory(context) {
+            override fun buildAudioSink(
+                context: android.content.Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): androidx.media3.exoplayer.audio.AudioSink? {
+                val sanitizer = ChannelMaskSanitizerAudioProcessor()
+                return androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context)
+                    .setAudioProcessors(arrayOf(sanitizer))
+                    .build()
+            }
+
+            override fun buildTextRenderers(
+                context: android.content.Context,
+                output: androidx.media3.exoplayer.text.TextOutput,
+                outputLooper: android.os.Looper,
+                extensionRendererMode: Int,
+                out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>
+            ) {
+                val textRenderer = androidx.media3.exoplayer.text.TextRenderer(output, outputLooper)
+                textRenderer.experimentalSetLegacyDecodingEnabled(true)
+                out.add(textRenderer)
+            }
+        }.apply {
+            setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
         }
+        val dataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context)
+        val mediaSourceFactory = CustomMediaSourceFactory(context, dataSourceFactory)
+
+        ExoPlayer.Builder(context)
+            .setRenderersFactory(renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build().apply {
+                playWhenReady = true
+            }
     }
 
     var isLocked by remember { mutableStateOf(false) }
@@ -84,7 +280,6 @@ fun PlayerScreen(
             showLockIconOnly = true
             resetLockTimeout()
         } else {
-            exoPlayer.release()
             viewModel.clearActivePlayback()
             val activity = context as? Activity
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -92,28 +287,82 @@ fun PlayerScreen(
         }
     }
 
-    // Configure MediaItem when current video changes
-    LaunchedEffect(video, hardwareAccel) {
-        val uri = Uri.parse(video.urlOrPath)
-        val schema = uri.scheme ?: ""
-        
+    // Reset external subtitle on video change
+    LaunchedEffect(video) {
+        if (lastVideoUrl != video.urlOrPath) {
+            lastVideoUrl = video.urlOrPath
+            externalSubtitleUri = null
+            selectedSubtitleGroupIndex = null
+            selectedSubtitleTrackIndex = null
+            selectedAudioGroupIndex = null
+            selectedAudioTrackIndex = null
+            isSubtitleDisabled = true
+        }
+    }
+
+    // Configure MediaItem when current video changes or external subtitle is added
+    LaunchedEffect(video, hardwareAccel, externalSubtitleUri) {
+        scale = 1f
+        is4kHevcVideo = false
+        // If it's a completely new video, start from progressMap. Otherwise preserve current position.
+        val isNewVideo = lastVideoUrl != video.urlOrPath
+        val currentPosBeforeReload = if (isNewVideo) 0L else exoPlayer.currentPosition
+        if (isNewVideo) {
+            lastVideoUrl = video.urlOrPath
+        }
+
+        val uri = if (video.isLocal) {
+            val idLong = video.id.toLongOrNull()
+            if (idLong != null) {
+                android.content.ContentUris.withAppendedId(
+                    android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    idLong
+                )
+            } else {
+                Uri.parse(video.urlOrPath)
+            }
+        } else {
+            Uri.parse(video.urlOrPath)
+        }
         val mediaItemBuilder = MediaItem.Builder()
             .setUri(uri)
 
-        // Add subtitle track if exists
-        val subtitlePath = video.subtitleUrlOrPath
-        if (!subtitlePath.isNullOrEmpty()) {
-            val mimeType = if (subtitlePath.endsWith(".srt")) {
+        val subtitleConfigs = mutableListOf<MediaItem.SubtitleConfiguration>()
+
+        // Add database subtitle if exists
+        val dbSubtitlePath = video.subtitleUrlOrPath
+        if (!dbSubtitlePath.isNullOrEmpty()) {
+            val mimeType = if (dbSubtitlePath.endsWith(".srt")) {
                 MimeTypes.APPLICATION_SUBRIP
             } else {
                 MimeTypes.TEXT_VTT
             }
-            val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitlePath))
+            val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(Uri.parse(dbSubtitlePath))
                 .setMimeType(mimeType)
                 .setLanguage("en")
                 .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                 .build()
-            mediaItemBuilder.setSubtitleConfigurations(listOf(subtitleConfig))
+            subtitleConfigs.add(subtitleConfig)
+        }
+
+        // Add side-loaded external subtitle if exists
+        externalSubtitleUri?.let { extUri ->
+            val extUriStr = extUri.toString()
+            val mimeType = if (extUriStr.endsWith(".srt") || getFileName(context, extUri).endsWith(".srt")) {
+                MimeTypes.APPLICATION_SUBRIP
+            } else {
+                MimeTypes.TEXT_VTT
+            }
+            val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(extUri)
+                .setMimeType(mimeType)
+                .setLanguage("en (External)")
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .build()
+            subtitleConfigs.add(subtitleConfig)
+        }
+
+        if (subtitleConfigs.isNotEmpty()) {
+            mediaItemBuilder.setSubtitleConfigurations(subtitleConfigs)
         }
 
         // Live stream mime detection
@@ -122,6 +371,19 @@ fun PlayerScreen(
         }
 
         exoPlayer.setMediaItem(mediaItemBuilder.build())
+        
+        if (currentPosBeforeReload > 0L) {
+            exoPlayer.seekTo(currentPosBeforeReload)
+        } else {
+            val resumeEnabled = viewModel.resumeFromLastLeftEnabled.value
+            if (resumeEnabled) {
+                val progressMap = viewModel.videoProgressMap.value
+                val savedProgress = progressMap[video.urlOrPath]?.first ?: 0L
+                if (savedProgress > 0L) {
+                    exoPlayer.seekTo(savedProgress)
+                }
+            }
+        }
         exoPlayer.prepare()
         exoPlayer.play()
     }
@@ -137,19 +399,87 @@ fun PlayerScreen(
     var aspectNotificationText by remember { mutableStateOf<String?>(null) }
     var lastAspectNotificationText by remember { mutableStateOf("") }
     var isMuted by remember { mutableStateOf(false) }
-    var activeSubtitles by remember { mutableStateOf(!video.subtitleUrlOrPath.isNullOrEmpty()) }
+    var activeSubtitles by remember { mutableStateOf(false) }
     var codecInfo by remember { mutableStateOf("Hardware (Auto)") }
     var videoResolution by remember { mutableStateOf("Detecting...") }
-    val displayName = remember(video.urlOrPath, video.title) {
-        val cleanUrl = video.urlOrPath.substringBefore('?')
-        val lastSegment = cleanUrl.substringAfterLast('/')
-        if (lastSegment.isNotBlank() && lastSegment.contains('.')) {
-            lastSegment
-        } else {
+    val infiniteTransition = rememberInfiniteTransition(label = "wave_phase")
+    val phaseShift by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "phase"
+    )
+
+    val waveAmplitudeTarget = if (isPlaying) 3.dp else 0.dp
+    val waveAmplitude by animateDpAsState(
+        targetValue = waveAmplitudeTarget,
+        animationSpec = tween(500),
+        label = "wave_amplitude"
+    )
+    val displayName = remember(video.urlOrPath, video.title, video.isStream) {
+        if (video.isStream && video.title.isNotBlank() && video.title != "Network Stream") {
             video.title
+        } else {
+            val cleanUrl = video.urlOrPath.substringBefore('?')
+            val lastSegment = cleanUrl.substringAfterLast('/')
+            if (lastSegment.isNotBlank() && lastSegment.contains('.') && !video.isStream) {
+                lastSegment
+            } else {
+                video.title
+            }
         }
     }
     var userInteractionTrigger by remember { mutableIntStateOf(0) }
+
+    // ─── Gesture control state ────────────────────────────────────────────────
+    val seekStepMs by viewModel.gestureSeekMs.collectAsState()
+    val controllerTimeout by viewModel.playerControllerTimeout.collectAsState()
+    val seekGestureEnabled by viewModel.seekGestureEnabled.collectAsState()
+    val volumeGestureEnabled by viewModel.volumeGestureEnabled.collectAsState()
+    val brightnessGestureEnabled by viewModel.brightnessGestureEnabled.collectAsState()
+    val seekSwipePixels by viewModel.seekSwipePixels.collectAsState()
+    val volumeSwipePixels by viewModel.volumeSwipePixels.collectAsState()
+    val brightnessSensitivitySetting by viewModel.brightnessSensitivity.collectAsState()
+    val zoomGestureEnabled by viewModel.zoomGestureEnabled.collectAsState()
+    val zoomSensitivity by viewModel.zoomSensitivity.collectAsState()
+    val audioManager = remember {
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
+    val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
+
+    // Accumulated drag deltas — reset on each new drag gesture
+    var dragAccumX by remember { mutableFloatStateOf(0f) }
+    var dragAccumY by remember { mutableFloatStateOf(0f) }
+    // Which horizontal zone the drag started in (true = left half = brightness)
+    var gestureStartZoneLeft by remember { mutableStateOf(false) }
+    // Type locked in on first significant movement within a single drag
+    var activeGestureType by remember { mutableStateOf<GestureType?>(null) }
+    var isGestureSeeking by remember { mutableStateOf(false) }
+    // Seek delta accumulates during drag; committed to ExoPlayer only on drag-end
+    var gestureSeekOffset by remember { mutableLongStateOf(0L) }
+    // Brightness and volume mirror current levels for HUD display
+    var gestureBrightness by remember {
+        mutableFloatStateOf(
+            (context as? Activity)?.window?.attributes?.screenBrightness
+                ?.takeIf { it >= 0f } ?: 0.5f
+        )
+    }
+    var gestureVolume by remember {
+        mutableFloatStateOf(
+            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / maxVolume.coerceAtLeast(1)
+        )
+    }
+    var showGestureHud by remember { mutableStateOf(false) }
+    var gestureHudHideTrigger by remember { mutableIntStateOf(0) }
+    // dragStartPos: position in the video when the current seek drag started
+    // Used as a stable anchor so every seek step is relative to the drag origin.
+    var dragStartPos by remember { mutableLongStateOf(0L) }
+    // lastSeekSteps: tracks the last committed step count to fire seeks only on step changes
+    var lastSeekSteps by remember { mutableLongStateOf(0L) }
+    // ─────────────────────────────────────────────────────────────────────────
 
     val resetControlsTimeout = {
         userInteractionTrigger++
@@ -172,39 +502,243 @@ fun PlayerScreen(
         }
     }
 
+    // Decoder notification autohide timer
+    LaunchedEffect(decoderNotificationText) {
+        if (decoderNotificationText != null) {
+            lastDecoderNotificationText = decoderNotificationText!!
+            delay(1500)
+            decoderNotificationText = null
+        }
+    }
+
     // Periodically update progress from ExoPlayer
-    LaunchedEffect(isPlaying) {
+    LaunchedEffect(isPlaying, exoPlayer) {
         while (true) {
-            currentPos = exoPlayer.currentPosition
-            duration = exoPlayer.duration.coerceAtLeast(0L)
-            bufferPos = exoPlayer.bufferedPosition
-            isPlaying = exoPlayer.isPlaying
+            if (!isGestureSeeking && !isSliderDragging) {
+                currentPos = exoPlayer.currentPosition
+                duration = exoPlayer.duration.coerceAtLeast(0L)
+                bufferPos = exoPlayer.bufferedPosition
+                isPlaying = exoPlayer.isPlaying
+                viewModel.setVideoPlaying(isPlaying)
+            }
             delay(250)
         }
     }
 
-    // Control autohide logic (resets whenever showControls OR userInteractionTrigger changes)
-    LaunchedEffect(showControls, userInteractionTrigger) {
+    // Apply seek parameters dynamically
+    LaunchedEffect(activeFastSeek, exoPlayer) {
+        exoPlayer.setSeekParameters(
+            if (activeFastSeek) SeekParameters.CLOSEST_SYNC
+            else SeekParameters.DEFAULT
+        )
+    }
+
+    // Periodically save progress to preferences (every 5 seconds)
+    LaunchedEffect(video, isPlaying, exoPlayer) {
+        if (isPlaying) {
+            while (true) {
+                delay(5000)
+                val currentPosition = exoPlayer.currentPosition
+                val totalDuration = exoPlayer.duration
+                if (totalDuration > 0) {
+                    viewModel.saveVideoProgress(video.urlOrPath, currentPosition, totalDuration)
+                }
+            }
+        }
+    }
+
+    // Save final progress on exit or video swap
+    DisposableEffect(video, exoPlayer) {
+        onDispose {
+            val currentPosition = exoPlayer.currentPosition
+            val totalDuration = exoPlayer.duration
+            if (totalDuration > 0) {
+                viewModel.saveVideoProgress(video.urlOrPath, currentPosition, totalDuration)
+            }
+        }
+    }
+
+    // Control autohide logic (resets whenever showControls, userInteractionTrigger OR controllerTimeout changes)
+    LaunchedEffect(showControls, userInteractionTrigger, controllerTimeout) {
         if (showControls) {
-            delay(4000)
+            delay(controllerTimeout * 1000L)
             showControls = false
         }
     }
 
+    // Gesture HUD auto-hide: triggered after each drag ends
+    LaunchedEffect(gestureHudHideTrigger) {
+        if (showGestureHud) {
+            delay(GESTURE_HUD_HIDE_DELAY)
+            showGestureHud = false
+            activeGestureType = null
+            // Wait for the fadeOut exit animation (300ms) to fully complete before
+            // resetting seek state. This ensures:
+            //  1. Seek text never flickers to "+0s" while HUD is still visible
+            //  2. Controls don't reappear until after the HUD has fully faded out
+            delay(300L)
+            gestureSeekOffset = 0L
+            isGestureSeeking = false
+        }
+    }
+
     // Manage volume
-    LaunchedEffect(isMuted) {
+    LaunchedEffect(isMuted, exoPlayer) {
         exoPlayer.volume = if (isMuted) 0f else 1f
     }
 
-    // Listeners for video events
+    LaunchedEffect(exoPlayer) {
+        viewModel.playbackCommand.collect { command ->
+            when (command) {
+                VideoPlayerViewModel.PlaybackCommand.PLAY -> exoPlayer.play()
+                VideoPlayerViewModel.PlaybackCommand.PAUSE -> exoPlayer.pause()
+            }
+        }
+    }
+
+    // Device orientation sensor tracking (Transition-aware to avoid shake-triggered repetition)
+    DisposableEffect(exoPlayer) {
+        val activity = context as? Activity
+        val orientationListener = object : OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+
+                val isPhysicalPortrait = orientation in 330..359 || orientation in 0..30
+                val isPhysicalLandscape = orientation in 60..120 || orientation in 240..300
+
+                val currentPhysical = when {
+                    isPhysicalPortrait -> DeviceOrientation.PORTRAIT
+                    isPhysicalLandscape -> DeviceOrientation.LANDSCAPE
+                    else -> DeviceOrientation.UNKNOWN
+                }
+
+                val isScreenPortrait = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+                val isScreenLandscape = context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+
+                if (currentPhysical != DeviceOrientation.UNKNOWN && currentPhysical != lastPhysicalOrientation) {
+                    lastPhysicalOrientation = currentPhysical
+
+                    // If current screen is landscape but device is held vertically (suggest portrait)
+                    if (currentPhysical == DeviceOrientation.PORTRAIT && isScreenLandscape) {
+                        suggestedTargetOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        showOrientationSuggestion = true
+                        orientationSuggestionTrigger++
+                    }
+                    // If current screen is portrait but device is held horizontally (suggest landscape)
+                    else if (currentPhysical == DeviceOrientation.LANDSCAPE && isScreenPortrait) {
+                        suggestedTargetOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        showOrientationSuggestion = true
+                        orientationSuggestionTrigger++
+                    }
+                } else if (currentPhysical != DeviceOrientation.UNKNOWN) {
+                    // If the user rotates the device back to match current screen, hide recommendation immediately
+                    val matchesLandscape = currentPhysical == DeviceOrientation.LANDSCAPE && isScreenLandscape
+                    val matchesPortrait = currentPhysical == DeviceOrientation.PORTRAIT && isScreenPortrait
+
+                    if ((matchesLandscape || matchesPortrait) && showOrientationSuggestion) {
+                        showOrientationSuggestion = false
+                    }
+                }
+            }
+        }
+
+        if (orientationListener.canDetectOrientation()) {
+            orientationListener.enable()
+        }
+
+        onDispose {
+            orientationListener.disable()
+        }
+    }
+
+    // Auto-dismiss orientation suggestion after 5 seconds
+    LaunchedEffect(orientationSuggestionTrigger) {
+        if (showOrientationSuggestion) {
+            delay(5000L)
+            showOrientationSuggestion = false
+        }
+    }
+
+    // Sync system bars visibility with player controls visibility
+    LaunchedEffect(showControls) {
+        val activity = context as? Activity
+        activity?.window?.let { win ->
+            val windowInsetsController = WindowCompat.getInsetsController(win, win.decorView)
+            windowInsetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (showControls) {
+                windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
+            } else {
+                windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    // Screen Lifecycle (Brightness, Orientation, & Immersive System Bars resets/coloring)
     DisposableEffect(Unit) {
+        val activity = context as? Activity
+        
+        // Save original system bar styles and colors
+        val originalStatusBarColor = activity?.window?.statusBarColor
+        val originalNavigationBarColor = activity?.window?.navigationBarColor
+        val originalLightStatusBars = activity?.window?.let { win ->
+            WindowCompat.getInsetsController(win, win.decorView).isAppearanceLightStatusBars
+        }
+        val originalLightNavigationBars = activity?.window?.let { win ->
+            WindowCompat.getInsetsController(win, win.decorView).isAppearanceLightNavigationBars
+        }
+
+        // Apply dark semi-transparent backgrounds and white icons for system bars
+        activity?.window?.let { win ->
+            win.statusBarColor = android.graphics.Color.parseColor("#80000000")
+            win.navigationBarColor = android.graphics.Color.parseColor("#80000000")
+            val controller = WindowCompat.getInsetsController(win, win.decorView)
+            controller.isAppearanceLightStatusBars = false
+            controller.isAppearanceLightNavigationBars = false
+        }
+        
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity?.window?.let { win ->
+                // Restore status bar and navigation bar
+                val controller = WindowCompat.getInsetsController(win, win.decorView)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                
+                // Restore original appearance styles
+                if (originalLightStatusBars != null) {
+                    controller.isAppearanceLightStatusBars = originalLightStatusBars
+                }
+                if (originalLightNavigationBars != null) {
+                    controller.isAppearanceLightNavigationBars = originalLightNavigationBars
+                }
+
+                // Restore original system bar colors
+                if (originalStatusBarColor != null) win.statusBarColor = originalStatusBarColor
+                if (originalNavigationBarColor != null) win.navigationBarColor = originalNavigationBarColor
+
+                // Reset screen brightness
+                val attrs = win.attributes
+                attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                win.attributes = attrs
+            }
+        }
+    }
+
+    // Player Instance Lifecycle (registers listeners and releases player when recreated or exited)
+    DisposableEffect(exoPlayer) {
         val activity = context as? Activity
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 duration = exoPlayer.duration.coerceAtLeast(0L)
+                isLoading = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_ENDED) {
                     viewModel.playNext()
                 }
+            }
+
+            override fun onIsPlayingChanged(isPlayingNew: Boolean) {
+                isPlaying = isPlayingNew
+                viewModel.setVideoPlaying(isPlayingNew)
             }
 
             override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -212,6 +746,7 @@ fun PlayerScreen(
                 val height = videoSize.height
                 if (width > 0 && height > 0) {
                     videoResolution = "${width}x${height}"
+                    viewModel.setVideoDimensions(width, height)
                     if (width > height) {
                         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                     } else {
@@ -222,6 +757,7 @@ fun PlayerScreen(
 
             override fun onTracksChanged(tracks: Tracks) {
                 // Read format information for video track if available to show real codecs!
+                var hevc4k = false
                 for (group in tracks.groups) {
                     if (group.type == C.TRACK_TYPE_VIDEO) {
                         for (i in 0 until group.length) {
@@ -229,17 +765,142 @@ fun PlayerScreen(
                                 val format = group.getTrackFormat(i)
                                 codecInfo = "${format.sampleMimeType ?: "N/A"} (${format.width}x${format.height})"
                                 videoResolution = "${format.width}x${format.height}"
+                                viewModel.setVideoDimensions(format.width, format.height)
+
+                                val mime = format.sampleMimeType
+                                val width = format.width
+                                val height = format.height
+                                val isHevc = mime == MimeTypes.VIDEO_H265 || (mime != null && mime.contains("hevc", ignoreCase = true))
+                                val isHighRes = width >= 3840 || height >= 2160
+                                if (isHevc && isHighRes) {
+                                    hevc4k = true
+                                }
                             }
                         }
                     }
                 }
+                is4kHevcVideo = hevc4k
+
+                // Query subtitle tracks (no longer filtering by isTrackSupported to avoid platform capabilities reporting bugs)
+                var textSelected = false
+                val list = mutableListOf<SubtitleTrackInfo>()
+                for (groupIndex in 0 until tracks.groups.size) {
+                    val group = tracks.groups[groupIndex]
+                    if (group.type == C.TRACK_TYPE_TEXT) {
+                        for (trackIndex in 0 until group.length) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val isSelected = group.isTrackSelected(trackIndex)
+                            if (isSelected) {
+                                textSelected = true
+                            }
+                            list.add(SubtitleTrackInfo(groupIndex, trackIndex, format, isSelected))
+                        }
+                    }
+                }
+                subtitleTracks = list
+                activeSubtitles = textSelected
+
+                // Query audio tracks
+                val audioList = mutableListOf<AudioTrackInfo>()
+                for (groupIndex in 0 until tracks.groups.size) {
+                    val group = tracks.groups[groupIndex]
+                    if (group.type == C.TRACK_TYPE_AUDIO) {
+                        for (trackIndex in 0 until group.length) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val isSelected = group.isTrackSelected(trackIndex)
+                            audioList.add(AudioTrackInfo(groupIndex, trackIndex, format, isSelected))
+                        }
+                    }
+                }
+                audioTracks = audioList
+
+                // Restore track selections if they exist
+                var parametersBuilder = exoPlayer.trackSelectionParameters.buildUpon()
+                var updated = false
+
+                if (isSubtitleDisabled) {
+                    if (!exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) {
+                        parametersBuilder = parametersBuilder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        updated = true
+                    }
+                } else if (selectedSubtitleGroupIndex != null && selectedSubtitleTrackIndex != null) {
+                    val groupIdx = selectedSubtitleGroupIndex!!
+                    val trackIdx = selectedSubtitleTrackIndex!!
+                    if (groupIdx < tracks.groups.size) {
+                        val group = tracks.groups[groupIdx]
+                        if (group.type == C.TRACK_TYPE_TEXT && trackIdx < group.length) {
+                            val trackGroup = group.mediaTrackGroup
+                            val hasOverride = exoPlayer.trackSelectionParameters.overrides.containsKey(trackGroup)
+                            if (!hasOverride || exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) {
+                                parametersBuilder = parametersBuilder
+                                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                    .addOverride(TrackSelectionOverride(trackGroup, trackIdx))
+                                updated = true
+                            }
+                        }
+                    }
+                }
+
+                if (selectedAudioGroupIndex != null && selectedAudioTrackIndex != null) {
+                    val groupIdx = selectedAudioGroupIndex!!
+                    val trackIdx = selectedAudioTrackIndex!!
+                    if (groupIdx < tracks.groups.size) {
+                        val group = tracks.groups[groupIdx]
+                        if (group.type == C.TRACK_TYPE_AUDIO && trackIdx < group.length) {
+                            val trackGroup = group.mediaTrackGroup
+                            val hasOverride = exoPlayer.trackSelectionParameters.overrides.containsKey(trackGroup)
+                            if (!hasOverride) {
+                                parametersBuilder = parametersBuilder
+                                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                                    .addOverride(TrackSelectionOverride(trackGroup, trackIdx))
+                                updated = true
+                            }
+                        }
+                    }
+                }
+
+                if (updated) {
+                    exoPlayer.trackSelectionParameters = parametersBuilder.build()
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val cause = error.cause
+                val errorMessage = when {
+                    error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> {
+                        "Codec/Decoder initialization failed. Your device might not support this video profile or audio format (like 4K HEVC 10-bit or Dolby E-AC-3)."
+                    }
+                    error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED -> {
+                        "Decoding failed. The file is corrupted or uses an unsupported codec format."
+                    }
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> {
+                        "File read error. Please check permissions or file integrity."
+                    }
+                    cause != null && cause.message?.contains("EAC3", ignoreCase = true) == true ||
+                    cause != null && cause.message?.contains("ac-3", ignoreCase = true) == true -> {
+                        "Audio format (Dolby Digital Plus EAC3) is not supported by your device."
+                    }
+                    cause != null && cause.message?.contains("hevc", ignoreCase = true) == true ||
+                    cause != null && cause.message?.contains("h265", ignoreCase = true) == true -> {
+                        "Video format (HEVC H.265 10-bit) is not supported by your device."
+                    }
+                    else -> {
+                        "Playback error: ${error.localizedMessage ?: "Unknown error"}"
+                    }
+                }
+                playbackErrorMsg = errorMessage
+                isLoading = false
+                Log.e("PlayerScreen", "Player error occurred: ${error.errorCodeName} (${error.errorCode})", error)
             }
         }
         exoPlayer.addListener(listener)
         onDispose {
             exoPlayer.removeListener(listener)
             exoPlayer.release()
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            viewModel.setVideoPlaying(false)
         }
     }
 
@@ -248,6 +909,167 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(androidx.compose.ui.graphics.Color.Black)
             .testTag("player_screen_root")
+            // ── Pinch to Zoom gesture detector ──────────────────────────────────
+            .pointerInput(isLocked, isInPipMode, zoomGestureEnabled, zoomSensitivity) {
+                if (isInPipMode || isLocked || !zoomGestureEnabled) return@pointerInput
+                awaitPointerEventScope {
+                    var lastDistance = -1f
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val activePointers = event.changes.filter { it.pressed }
+                        if (activePointers.size >= 2) {
+                            val p1 = activePointers[0].position
+                            val p2 = activePointers[1].position
+                            val dx = p1.x - p2.x
+                            val dy = p1.y - p2.y
+                            val currentDistance = kotlin.math.sqrt(dx * dx + dy * dy)
+                            
+                            // Consume the touch events so they don't trigger drag actions
+                            event.changes.forEach { it.consume() }
+
+                            if (lastDistance > 0f && currentDistance > 0f) {
+                                val ratio = currentDistance / lastDistance
+                                val delta = 1f + (ratio - 1f) * zoomSensitivity
+                                scale = (scale * delta).coerceIn(1f, 4f)
+                            }
+                            lastDistance = currentDistance
+                        } else {
+                            lastDistance = -1f
+                        }
+                        if (event.changes.none { it.pressed }) {
+                            lastDistance = -1f
+                        }
+                    }
+                }
+            }
+            // ── Gesture detection (works in both portrait & landscape) ──────────
+            // Key on isLocked so the lambda is re-registered whenever lock changes.
+            .pointerInput(isLocked, isInPipMode, exoPlayer) {
+                if (isInPipMode) return@pointerInput
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        if (isLocked) return@detectDragGestures
+                        // Reset accumulators and classify zone from drag origin
+                        dragAccumX = 0f
+                        dragAccumY = 0f
+                        gestureStartZoneLeft = offset.x < size.width / 2f
+                        activeGestureType = null
+                        isGestureSeeking = false
+                        showGestureHud = false
+                        // Capture stable seek anchor and reset step tracker
+                        dragStartPos = currentPos
+                        lastSeekSteps = 0L
+                    },
+                    onDrag = { change, dragAmount ->
+                        if (isLocked) return@detectDragGestures
+                        change.consume()
+                        dragAccumX += dragAmount.x
+                        dragAccumY += dragAmount.y
+
+                        // Lock the gesture type on the first significant movement
+                        if (activeGestureType == null) {
+                            when {
+                                // Horizontal dominant → seek
+                                abs(dragAccumX) > abs(dragAccumY) * 1.5f && seekGestureEnabled -> {
+                                    activeGestureType = GestureType.SEEK
+                                    isGestureSeeking = true
+                                    // CLOSEST_SYNC snaps to the nearest keyframe — far faster
+                                    // than exact-frame seeks, which is what makes scrubbing smooth
+                                    exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                                    showGestureHud = true
+                                }
+                                // Vertical dominant (>10px threshold) → brightness or volume
+                                abs(dragAccumY) > 10f -> {
+                                    if (gestureStartZoneLeft && brightnessGestureEnabled) {
+                                        activeGestureType = GestureType.BRIGHTNESS
+                                        showGestureHud = true
+                                    } else if (!gestureStartZoneLeft && volumeGestureEnabled) {
+                                        activeGestureType = GestureType.VOLUME
+                                        showGestureHud = true
+                                    }
+                                }
+                            }
+                        }
+
+                        when (activeGestureType) {
+                            GestureType.SEEK -> {
+                                // Steps accumulated relative to drag start anchor
+                                val steps = (dragAccumX / seekSwipePixels).toLong()
+                                gestureSeekOffset = steps * seekStepMs
+                                // Live seek: fire exoPlayer.seekTo on every new step crossing
+                                val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
+                                currentPos = target
+                                if (steps != lastSeekSteps) {
+                                    lastSeekSteps = steps
+                                    if (!activeFastSeek) {
+                                        exoPlayer.seekTo(target)
+                                    }
+                                }
+                            }
+                            GestureType.BRIGHTNESS -> {
+                                // Swipe up = positive deltaY is downward in Compose → invert
+                                gestureBrightness = (gestureBrightness - dragAmount.y * brightnessSensitivitySetting)
+                                    .coerceIn(0.01f, 1.0f)
+                                val activity = context as? Activity
+                                activity?.window?.let { win ->
+                                    val attrs = win.attributes
+                                    attrs.screenBrightness = gestureBrightness
+                                    win.attributes = attrs
+                                }
+                            }
+                            GestureType.VOLUME -> {
+                                val step = dragAmount.y / volumeSwipePixels
+                                gestureVolume = (gestureVolume - step).coerceIn(0f, 1f)
+                                val newVol = (gestureVolume * maxVolume).toInt()
+                                audioManager.setStreamVolume(
+                                    AudioManager.STREAM_MUSIC,
+                                    newVol,
+                                    AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE
+                                )
+                                // Clear in-app mute if user deliberately raises volume
+                                if (gestureVolume > 0f && isMuted) isMuted = false
+                            }
+                            null -> Unit
+                        }
+                    },
+                    onDragEnd = {
+                        if (isGestureSeeking) {
+                            val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
+                            android.util.Log.d("PlayerScreen", "Gesture drag end: target=$target, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
+                            if (activeFastSeek) {
+                                exoPlayer.seekTo(target)
+                            }
+                            // Sync currentPos now; gestureSeekOffset + isGestureSeeking are
+                            // reset after the HUD fadeOut completes (see LaunchedEffect above)
+                            currentPos = target
+                            exoPlayer.setSeekParameters(
+                                if (activeFastSeek) SeekParameters.CLOSEST_SYNC
+                                else SeekParameters.DEFAULT
+                            )
+                        }
+                        // Brightness: intentionally NOT reset here — the gesture-set level
+                        // stays for the full player session (matching VLC / MX Player behavior).
+                        // BRIGHTNESS_OVERRIDE_NONE is restored in onDispose when the player exits.
+                        gestureHudHideTrigger++
+                    },
+                    onDragCancel = {
+                        if (isGestureSeeking) {
+                            val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
+                            android.util.Log.d("PlayerScreen", "Gesture drag cancel: target=$target, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
+                            if (activeFastSeek) {
+                                exoPlayer.seekTo(target)
+                            }
+                            currentPos = target
+                            exoPlayer.setSeekParameters(
+                                if (activeFastSeek) SeekParameters.CLOSEST_SYNC
+                                else SeekParameters.DEFAULT
+                            )
+                        }
+                        gestureHudHideTrigger++
+                    }
+                )
+            }
+            // ─────────────────────────────────────────────────────────────────
     ) {
         // Player View
         AndroidView(
@@ -263,13 +1085,69 @@ fun PlayerScreen(
                 }
             },
             update = { view ->
+                if (view.player != exoPlayer) {
+                    view.player = exoPlayer
+                }
                 view.resizeMode = selectedAspectRatio
+                val style = when (subtitleStyle) {
+                    SubtitleStyle.Default -> null
+                    SubtitleStyle.ClassicWhite -> CaptionStyleCompat(
+                        Color.WHITE,
+                        Color.TRANSPARENT,
+                        Color.TRANSPARENT,
+                        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                        Color.BLACK,
+                        null
+                    )
+                    SubtitleStyle.WarmYellow -> CaptionStyleCompat(
+                        Color.YELLOW,
+                        Color.TRANSPARENT,
+                        Color.TRANSPARENT,
+                        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                        Color.BLACK,
+                        null
+                    )
+                    SubtitleStyle.CyanOutline -> CaptionStyleCompat(
+                        Color.CYAN,
+                        Color.TRANSPARENT,
+                        Color.TRANSPARENT,
+                        CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                        Color.BLACK,
+                        null
+                    )
+                    SubtitleStyle.WhiteOnBlackBox -> CaptionStyleCompat(
+                        Color.WHITE,
+                        Color.argb(128, 0, 0, 0),
+                        Color.TRANSPARENT,
+                        CaptionStyleCompat.EDGE_TYPE_NONE,
+                        Color.TRANSPARENT,
+                        null
+                    )
+                    SubtitleStyle.YellowOnBlackBox -> CaptionStyleCompat(
+                        Color.YELLOW,
+                        Color.argb(128, 0, 0, 0),
+                        Color.TRANSPARENT,
+                        CaptionStyleCompat.EDGE_TYPE_NONE,
+                        Color.TRANSPARENT,
+                        null
+                    )
+                }
+                if (style == null) {
+                    view.subtitleView?.setUserDefaultStyle()
+                } else {
+                    view.subtitleView?.setStyle(style)
+                }
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    scaleX = scale,
+                    scaleY = scale
+                )
         )
 
         // Transparent tap-target layer that is active when controls are hidden OR when screen is locked
-        if (!showControls || isLocked) {
+        if ((!showControls || isLocked) && !isInPipMode) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -292,7 +1170,7 @@ fun PlayerScreen(
         // IMMERSIVE SUBTITLE LAYER (Native fallback subtitles displayed beautifully inside PlayerView by default)
         // Compose overlay controls
         AnimatedVisibility(
-            visible = showControls && !isLocked,
+            visible = showControls && !isLocked && !isGestureSeeking && !isInPipMode,
             enter = fadeIn(animationSpec = tween(300)),
             exit = fadeOut(animationSpec = tween(300))
         ) {
@@ -351,14 +1229,7 @@ fun PlayerScreen(
                                 color = androidx.compose.ui.graphics.Color.White,
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = if (video.isStream) "Live Stream • $videoResolution" else "Offline Copy • $videoResolution",
-                                color = androidx.compose.ui.graphics.Color.Gray,
-                                fontSize = 12.sp,
-                                maxLines = 1,
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -367,38 +1238,105 @@ fun PlayerScreen(
                     Spacer(modifier = Modifier.width(8.dp))
 
                     // Top Actions
-                    Row {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Decoder Selector (Hardware vs Software)
+                        IconButton(
+                            onClick = {
+                                resetControlsTimeout()
+                                showDecoderDialog = true
+                            }
+                        ) {
+                            val tintColor = if (!hardwareAccel) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.White
+                            Box(
+                                modifier = Modifier
+                                    .width(28.dp)
+                                    .height(20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "SW",
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tintColor,
+                                    lineHeight = 17.sp
+                                )
+                                if (hardwareAccel) {
+                                    Canvas(
+                                        modifier = Modifier
+                                            .width(24.dp)
+                                            .height(14.dp)
+                                            .align(Alignment.Center)
+                                    ) {
+                                        drawLine(
+                                            color = tintColor,
+                                            start = Offset(0f, size.height),
+                                            end = Offset(size.width, 0f),
+                                            strokeWidth = 2.dp.toPx(),
+                                            cap = StrokeCap.Round
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Audio Track Selector
+                        IconButton(
+                            onClick = {
+                                resetControlsTimeout()
+                                val tracks = exoPlayer.currentTracks
+                                val audioList = mutableListOf<AudioTrackInfo>()
+                                for (groupIndex in 0 until tracks.groups.size) {
+                                    val group = tracks.groups[groupIndex]
+                                    if (group.type == C.TRACK_TYPE_AUDIO) {
+                                        for (trackIndex in 0 until group.length) {
+                                            val format = group.getTrackFormat(trackIndex)
+                                            val isSelected = group.isTrackSelected(trackIndex)
+                                            audioList.add(AudioTrackInfo(groupIndex, trackIndex, format, isSelected))
+                                        }
+                                    }
+                                }
+                                audioTracks = audioList
+                                showAudioTrackDialog = true
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Audiotrack,
+                                contentDescription = "Audio Tracks",
+                                tint = androidx.compose.ui.graphics.Color.White
+                            )
+                        }
+
                         // Subtitle toggle
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
-                                activeSubtitles = !activeSubtitles
-                                val trackSelection = if (activeSubtitles) {
-                                    TrackSelectionParameters.Builder(context).build()
-                                } else {
-                                    TrackSelectionParameters.Builder(context)
-                                        .setDisabledTrackTypes(setOf(C.TRACK_TYPE_TEXT))
-                                        .build()
+                                val tracks = exoPlayer.currentTracks
+                                val list = mutableListOf<SubtitleTrackInfo>()
+                                for (groupIndex in 0 until tracks.groups.size) {
+                                    val group = tracks.groups[groupIndex]
+                                    if (group.type == C.TRACK_TYPE_TEXT) {
+                                        for (trackIndex in 0 until group.length) {
+                                            val format = group.getTrackFormat(trackIndex)
+                                            val isSelected = group.isTrackSelected(trackIndex)
+                                            list.add(SubtitleTrackInfo(groupIndex, trackIndex, format, isSelected))
+                                        }
+                                    }
                                 }
-                                exoPlayer.trackSelectionParameters = trackSelection
+                                subtitleTracks = list
+                                if (list.isEmpty()) {
+                                    showNoSubtitlesPrompt = true
+                                } else {
+                                    showSubtitleDialog = true
+                                }
                             }
                         ) {
                             Icon(
                                 imageVector = if (activeSubtitles) Icons.Default.Subtitles else Icons.Default.SubtitlesOff,
                                 contentDescription = "Subtitles",
                                 tint = if (activeSubtitles) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.LightGray
-                            )
-                        }
-
-                        // Mute toggle
-                        IconButton(onClick = {
-                            resetControlsTimeout()
-                            isMuted = !isMuted
-                        }) {
-                            Icon(
-                                imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                contentDescription = "Mute",
-                                tint = androidx.compose.ui.graphics.Color.White
                             )
                         }
 
@@ -431,48 +1369,6 @@ fun PlayerScreen(
                                     )
                                 }
                             }
-                        }
-
-                        // Aspect ratio toggle
-                        IconButton(onClick = {
-                            resetControlsTimeout()
-                            selectedAspectRatio = when (selectedAspectRatio) {
-                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> {
-                                    aspectNotificationText = "Fill / Stretch"
-                                    AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                }
-                                AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
-                                    aspectNotificationText = "Zoom"
-                                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                }
-                                else -> {
-                                    aspectNotificationText = "Fit to Screen"
-                                    AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                }
-                            }
-                        }) {
-                            Icon(
-                                imageVector = Icons.Default.AspectRatio,
-                                contentDescription = "Aspect Ratio",
-                                tint = androidx.compose.ui.graphics.Color.White
-                            )
-                        }
-
-                        // Lock Controls button
-                        IconButton(
-                            onClick = {
-                                isLocked = true
-                                showControls = false
-                                showLockIconOnly = true
-                                resetLockTimeout()
-                            },
-                            modifier = Modifier.testTag("player_lock_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.LockOpen,
-                                contentDescription = "Lock Controls",
-                                tint = androidx.compose.ui.graphics.Color.White
-                            )
                         }
                     }
                 }
@@ -603,65 +1499,185 @@ fun PlayerScreen(
                         .navigationBarsPadding()
                         .padding(horizontal = 24.dp, vertical = 16.dp)
                 ) {
-                    // Audio description and hardware mode indicator
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = if (hardwareAccel) "⚙ HW ACCELERATED (On)" else "⚙ SOFTWARE DECODING (Fallback)",
-                            color = if (hardwareAccel) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Yellow,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
+                        // Seek Slider (holding remaining width)
+                        val sliderPos = if (duration > 0) currentPos.toFloat() / duration else 0f
+                        val primaryColor = MaterialTheme.colorScheme.primary
+                        Slider(
+                            value = sliderPos,
+                            onValueChange = {
+                                resetControlsTimeout()
+                                isSliderDragging = true
+                                val target = (it * duration).toLong()
+                                currentPos = target
+                                if (!activeFastSeek) {
+                                    exoPlayer.seekTo(target)
+                                }
+                            },
+                            onValueChangeFinished = {
+                                isSliderDragging = false
+                                android.util.Log.d("PlayerScreen", "Slider change finished: currentPos=$currentPos, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
+                                if (activeFastSeek) {
+                                    exoPlayer.seekTo(currentPos)
+                                }
+                            },
+                            track = { sliderState ->
+                                val fraction = sliderState.value
+                                Canvas(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(24.dp)
+                                ) {
+                                    val width = size.width
+                                    val centerY = size.height / 2f
+                                    val activeWidth = width * fraction
+                                    
+                                    // Inactive track: straight line
+                                    drawLine(
+                                        color = androidx.compose.ui.graphics.Color.DarkGray,
+                                        start = Offset(activeWidth, centerY),
+                                        end = Offset(width, centerY),
+                                        strokeWidth = 5.dp.toPx(),
+                                        cap = StrokeCap.Round
+                                    )
+                                    
+                                    // Active track: wavy curve
+                                    if (activeWidth > 0f) {
+                                        val path = Path()
+                                        path.moveTo(0f, centerY)
+                                        val wavelength = 24.dp.toPx()
+                                        val amplitude = waveAmplitude.toPx()
+                                        val dampingDistance = 36.dp.toPx() // 1.5 wavelengths damping zone
+                                        val step = 4f
+                                        var x = 0f
+                                        while (x < activeWidth) {
+                                            val nextX = (x + step).coerceAtMost(activeWidth)
+                                            
+                                            // Damp wave amplitude at the end (near thumb)
+                                            val distanceToThumb = activeWidth - x
+                                            val endDamping = if (distanceToThumb < dampingDistance) {
+                                                distanceToThumb / dampingDistance
+                                            } else {
+                                                1f
+                                            }
+                                            
+                                            // Damp wave amplitude at the start (near 0)
+                                            val distanceToStart = x
+                                            val startDamping = if (distanceToStart < dampingDistance) {
+                                                distanceToStart / dampingDistance
+                                            } else {
+                                                1f
+                                            }
+                                            
+                                            val currentAmplitude = amplitude * endDamping * startDamping
+                                            val angle = (2f * Math.PI.toFloat() * x / wavelength) - phaseShift
+                                            val y = centerY + currentAmplitude * kotlin.math.sin(angle)
+                                            path.lineTo(nextX, y)
+                                            x = nextX
+                                        }
+                                        path.lineTo(activeWidth, centerY)
+                                        drawPath(
+                                            path = path,
+                                            color = primaryColor,
+                                            style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                                        )
+                                    }
+                                }
+                            },
+                            thumb = { sliderState ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp), // Larger touch target
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(16.dp) // Larger visible circle dot
+                                            .background(color = primaryColor, shape = CircleShape)
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("video_seek_slider")
                         )
 
+                        Spacer(modifier = Modifier.width(5.dp))
+
+                        // Time display on the right end
                         Text(
-                            text = "Speed: ${playbackSpeed}x",
+                            text = if (video.isStream) "LIVE" else formatDynamicTime(currentPos, duration),
                             color = androidx.compose.ui.graphics.Color.White,
-                            fontSize = 12.sp
+                            fontSize = 14.sp,
+                            fontFamily = FontFamily.Monospace
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                    // Seek Slider
-                    val sliderPos = if (duration > 0) currentPos.toFloat() / duration else 0f
-                    Slider(
-                        value = sliderPos,
-                        onValueChange = {
-                            resetControlsTimeout()
-                            val target = (it * duration).toLong()
-                            exoPlayer.seekTo(target)
-                            currentPos = target
-                        },
-                        colors = SliderDefaults.colors(
-                            thumbColor = MaterialTheme.colorScheme.primary,
-                            activeTrackColor = MaterialTheme.colorScheme.primary,
-                            inactiveTrackColor = androidx.compose.ui.graphics.Color.DarkGray
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("video_seek_slider")
-                    )
-
+                    // Remaining utility icons at the very bottom on the right side
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = formatTime(currentPos),
-                            color = androidx.compose.ui.graphics.Color.White,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Text(
-                            text = if (video.isStream) "LIVE" else formatTime(duration),
-                            color = if (video.isStream) androidx.compose.ui.graphics.Color.Red else androidx.compose.ui.graphics.Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = if (video.isStream) FontWeight.Bold else FontWeight.Normal,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        // Mute toggle
+                        IconButton(onClick = {
+                            resetControlsTimeout()
+                            isMuted = !isMuted
+                        }) {
+                            Icon(
+                                imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                contentDescription = "Mute",
+                                tint = androidx.compose.ui.graphics.Color.White
+                            )
+                        }
+
+                        // Aspect ratio toggle
+                        IconButton(onClick = {
+                            resetControlsTimeout()
+                            selectedAspectRatio = when (selectedAspectRatio) {
+                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> {
+                                    aspectNotificationText = "Fill / Stretch"
+                                    AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                }
+                                AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
+                                    aspectNotificationText = "Zoom"
+                                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                }
+                                else -> {
+                                    aspectNotificationText = "Fit to Screen"
+                                    AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                }
+                            }
+                        }) {
+                            Icon(
+                                imageVector = Icons.Default.AspectRatio,
+                                contentDescription = "Aspect Ratio",
+                                tint = androidx.compose.ui.graphics.Color.White
+                            )
+                        }
+
+                        // Lock Controls button
+                        IconButton(
+                            onClick = {
+                                isLocked = true
+                                showControls = false
+                                showLockIconOnly = true
+                                resetLockTimeout()
+                            },
+                            modifier = Modifier.testTag("player_lock_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LockOpen,
+                                contentDescription = "Lock Controls",
+                                tint = androidx.compose.ui.graphics.Color.White
+                            )
+                        }
                     }
                 }
             }
@@ -700,6 +1716,17 @@ fun PlayerScreen(
             }
         }
 
+        // ── Gesture HUD Overlay (brightness / volume / seek feedback) ─────────
+        GestureHudOverlay(
+            visible = showGestureHud,
+            gestureType = activeGestureType,
+            brightness = gestureBrightness,
+            volume = gestureVolume,
+            seekOffsetMs = gestureSeekOffset,
+            seekBasePos = dragStartPos
+        )
+        // ─────────────────────────────────────────────────────────────────────
+
         AnimatedVisibility(
             visible = aspectNotificationText != null,
             enter = fadeIn(animationSpec = tween(200)) + scaleIn(initialScale = 0.8f, animationSpec = tween(200)),
@@ -724,8 +1751,985 @@ fun PlayerScreen(
                 )
             }
         }
+
+        AnimatedVisibility(
+            visible = decoderNotificationText != null,
+            enter = fadeIn(animationSpec = tween(200)) + scaleIn(initialScale = 0.8f, animationSpec = tween(200)),
+            exit = fadeOut(animationSpec = tween(300)) + scaleOut(targetScale = 0.8f, animationSpec = tween(300)),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 120.dp, end = 24.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.75f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = lastDecoderNotificationText,
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        if (showSubtitleDialog) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.4f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        showSubtitleDialog = false
+                    }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showSubtitleDialog,
+            enter = slideInHorizontally(
+                initialOffsetX = { fullWidth -> fullWidth },
+                animationSpec = tween(durationMillis = 300)
+            ) + fadeIn(animationSpec = tween(durationMillis = 300)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { fullWidth -> fullWidth },
+                animationSpec = tween(durationMillis = 300)
+            ) + fadeOut(animationSpec = tween(durationMillis = 300)),
+            modifier = Modifier
+                .width(280.dp)
+                .align(Alignment.BottomEnd)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .wrapContentHeight()
+                    .navigationBarsPadding(),
+                shape = RoundedCornerShape(
+                    topStart = 16.dp,
+                    bottomStart = 16.dp,
+                    topEnd = 16.dp
+                ),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                tonalElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight()
+                        .padding(16.dp)
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Subtitles",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        IconButton(
+                            onClick = { showSubtitleDialog = false }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close settings",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // List items (grows with items, up to max height, then scrolls)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        // Option: Off
+                        val isNoneSelected = !activeSubtitles || exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 36.dp)
+                                .selectable(
+                                    selected = isNoneSelected,
+                                    onClick = {
+                                        activeSubtitles = false
+                                        isSubtitleDisabled = true
+                                        selectedSubtitleGroupIndex = null
+                                        selectedSubtitleTrackIndex = null
+                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                            .buildUpon()
+                                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                                            .build()
+                                        showSubtitleDialog = false
+                                    }
+                                )
+                                .padding(horizontal = 4.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 3.dp)
+                                    .size(14.dp)
+                                    .border(1.5.dp, if (isNoneSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isNoneSelected) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Off",
+                                fontSize = 14.sp,
+                                color = if (isNoneSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                fontWeight = if (isNoneSelected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        }
+
+                        // Inbuilt tracks
+                        subtitleTracks.forEachIndexed { index, trackInfo ->
+                            val isTrackSelected = !isNoneSelected && trackInfo.isSelected
+                            val lang = trackInfo.format.language?.ifBlank { null } ?: "Unknown"
+                            val label = trackInfo.format.label?.ifBlank { null }
+                            val trackNum = index + 1
+                            val name = when {
+                                label != null -> "$label ($lang)"
+                                lang != "Unknown" -> "Track $trackNum ($lang)"
+                                else -> "Track $trackNum"
+                            }
+                            
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 36.dp)
+                                    .selectable(
+                                        selected = isTrackSelected,
+                                        onClick = {
+                                            activeSubtitles = true
+                                            isSubtitleDisabled = false
+                                            selectedSubtitleGroupIndex = trackInfo.groupIndex
+                                            selectedSubtitleTrackIndex = trackInfo.trackIndex
+                                            val trackGroup = exoPlayer.currentTracks.groups[trackInfo.groupIndex].mediaTrackGroup
+                                            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                .buildUpon()
+                                                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                                .addOverride(TrackSelectionOverride(trackGroup, trackInfo.trackIndex))
+                                                .build()
+                                            showSubtitleDialog = false
+                                        }
+                                    )
+                                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(top = 3.dp)
+                                        .size(14.dp)
+                                        .border(1.5.dp, if (isTrackSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isTrackSelected) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = name,
+                                    fontSize = 14.sp,
+                                    color = if (isTrackSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = if (isTrackSelected) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                            }
+                        }
+
+                        Divider(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+
+                        // Option: Select external subtitle
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .clickable {
+                                    showSubtitleDialog = false
+                                    openFilePicker()
+                                }
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Folder,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Select external subtitle...",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showNoSubtitlesPrompt) {
+            AlertDialog(
+                onDismissRequest = { showNoSubtitlesPrompt = false },
+                title = {
+                    Text(
+                        text = "No Inbuilt Subtitles",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                },
+                text = {
+                    Text(
+                        text = "This video has no inbuilt subtitles. Do you want to choose one from your file storage?",
+                        fontSize = 16.sp
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showNoSubtitlesPrompt = false
+                            openFilePicker()
+                        }
+                    ) {
+                        Text("Yes")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showNoSubtitlesPrompt = false }
+                    ) {
+                        Text("No")
+                    }
+                }
+            )
+        }
+
+        if (playbackErrorMsg != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black)
+                    .padding(24.dp)
+                    .clickable(enabled = false) {}, // Intercept clicks
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.widthIn(max = 400.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .background(MaterialTheme.colorScheme.error.copy(alpha = 0.1f), RoundedCornerShape(20.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Error,
+                            contentDescription = "Error",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "Playback Failed",
+                        fontWeight = FontWeight.Bold,
+                        color = androidx.compose.ui.graphics.Color.White,
+                        fontSize = 22.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+
+                    Text(
+                        text = playbackErrorMsg!!,
+                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.7f),
+                        fontSize = 14.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        lineHeight = 20.sp,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Button(
+                        onClick = {
+                            playbackErrorMsg = null
+                            exoPlayer.release()
+                            viewModel.clearActivePlayback()
+                            onBack()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth(0.6f)
+                            .height(44.dp)
+                    ) {
+                        Text(
+                            text = "Go Back",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showAudioTrackDialog) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.4f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        showAudioTrackDialog = false
+                    }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showAudioTrackDialog,
+            enter = slideInHorizontally(
+                initialOffsetX = { fullWidth -> fullWidth },
+                animationSpec = tween(durationMillis = 300)
+            ) + fadeIn(animationSpec = tween(durationMillis = 300)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { fullWidth -> fullWidth },
+                animationSpec = tween(durationMillis = 300)
+            ) + fadeOut(animationSpec = tween(durationMillis = 300)),
+            modifier = Modifier
+                .width(280.dp)
+                .align(Alignment.BottomEnd)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .wrapContentHeight()
+                    .navigationBarsPadding(),
+                shape = RoundedCornerShape(
+                    topStart = 16.dp,
+                    bottomStart = 16.dp,
+                    topEnd = 16.dp
+                ),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                tonalElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight()
+                        .padding(16.dp)
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Audio Tracks",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        IconButton(
+                            onClick = { showAudioTrackDialog = false }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close settings",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // List items (grows with items, up to max height, then scrolls)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (audioTracks.isEmpty()) {
+                            Text("No audio tracks available", fontSize = 14.sp)
+                        } else {
+                            audioTracks.forEachIndexed { index, trackInfo ->
+                                val lang = trackInfo.format.language?.ifBlank { null } ?: "Unknown"
+                                val label = trackInfo.format.label?.ifBlank { null }
+                                val trackNum = index + 1
+                                val name = when {
+                                    label != null -> "$label ($lang)"
+                                    lang != "Unknown" -> "Track $trackNum ($lang)"
+                                    else -> "Track $trackNum"
+                                }
+                                
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 36.dp)
+                                        .selectable(
+                                            selected = trackInfo.isSelected,
+                                            onClick = {
+                                                selectedAudioGroupIndex = trackInfo.groupIndex
+                                                selectedAudioTrackIndex = trackInfo.trackIndex
+                                                val trackGroup = exoPlayer.currentTracks.groups[trackInfo.groupIndex].mediaTrackGroup
+                                                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                    .buildUpon()
+                                                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                                                    .addOverride(TrackSelectionOverride(trackGroup, trackInfo.trackIndex))
+                                                    .build()
+                                                showAudioTrackDialog = false
+                                            }
+                                        )
+                                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(top = 3.dp)
+                                            .size(14.dp)
+                                            .border(1.5.dp, if (trackInfo.isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (trackInfo.isSelected) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = name,
+                                        fontSize = 14.sp,
+                                        color = if (trackInfo.isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = if (trackInfo.isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showDecoderDialog) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.4f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        showDecoderDialog = false
+                    }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showDecoderDialog,
+            enter = slideInHorizontally(
+                initialOffsetX = { fullWidth -> fullWidth },
+                animationSpec = tween(durationMillis = 300)
+            ) + fadeIn(animationSpec = tween(durationMillis = 300)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { fullWidth -> fullWidth },
+                animationSpec = tween(durationMillis = 300)
+            ) + fadeOut(animationSpec = tween(durationMillis = 300)),
+            modifier = Modifier
+                .width(280.dp)
+                .align(Alignment.BottomEnd)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .wrapContentHeight()
+                    .navigationBarsPadding(),
+                shape = RoundedCornerShape(
+                    topStart = 16.dp,
+                    bottomStart = 16.dp,
+                    topEnd = 16.dp
+                ),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                tonalElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight()
+                        .padding(16.dp)
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Select Decoder",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        IconButton(
+                            onClick = { showDecoderDialog = false }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close settings",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // List items
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Option 1: Hardware Decoder (HW)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = hardwareAccel,
+                                    onClick = {
+                                        if (!hardwareAccel) {
+                                            viewModel.toggleHardwareAcceleration()
+                                            decoderNotificationText = "Decoder: Hardware (HW)"
+                                        }
+                                        showDecoderDialog = false
+                                    }
+                                )
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 3.dp)
+                                    .size(14.dp)
+                                    .border(1.5.dp, if (hardwareAccel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (hardwareAccel) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Hardware Decoder (HW)",
+                                    fontSize = 14.sp,
+                                    color = if (hardwareAccel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = if (hardwareAccel) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                                Text(
+                                    text = "Uses device hardware decoders (efficient, but formats like Dolby EAC3 might not play)",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Option 2: Software Decoder (SW)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = !hardwareAccel,
+                                    onClick = {
+                                        if (hardwareAccel) {
+                                            viewModel.toggleHardwareAcceleration()
+                                            decoderNotificationText = "Decoder: Software (SW)"
+                                        }
+                                        showDecoderDialog = false
+                                    }
+                                )
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 3.dp)
+                                    .size(14.dp)
+                                    .border(1.5.dp, if (!hardwareAccel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (!hardwareAccel) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Software Decoder (SW)",
+                                    fontSize = 14.sp,
+                                    color = if (!hardwareAccel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = if (!hardwareAccel) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                                Text(
+                                    text = "Uses FFmpeg extension (supports Dolby EAC3/Atmos & high-end formats)",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f))
+                    .clickable(enabled = false) {},
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    color = MaterialTheme.colorScheme.primary,
+                    strokeWidth = 4.dp
+                )
+            }
+        }
+
+        // Floating orientation suggestion button (rotated dynamically based on target orientation)
+        val bottomPadding by animateDpAsState(
+            targetValue = if (showControls) 128.dp else 24.dp,
+            animationSpec = tween(durationMillis = 300),
+            label = "orientation_button_bottom_padding"
+        )
+
+        AnimatedVisibility(
+            visible = showOrientationSuggestion && !showSubtitleDialog && !showAudioTrackDialog && !showDecoderDialog,
+            enter = fadeIn() + scaleIn(),
+            exit = fadeOut() + scaleOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(bottom = bottomPadding, end = 24.dp)
+        ) {
+            val rotationAnim = remember { Animatable(if (suggestedTargetOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) 0f else -90f) }
+            LaunchedEffect(showOrientationSuggestion, suggestedTargetOrientation) {
+                if (showOrientationSuggestion) {
+                    val startAngle = if (suggestedTargetOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) 0f else -90f
+                    val endAngle = if (suggestedTargetOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) -90f else 0f
+                    repeat(2) {
+                        rotationAnim.snapTo(startAngle)
+                        rotationAnim.animateTo(
+                            targetValue = endAngle,
+                            animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing)
+                        )
+                        delay(1000L)
+                    }
+                }
+            }
+
+            FloatingActionButton(
+                onClick = {
+                    val activity = context as? Activity
+                    activity?.requestedOrientation = suggestedTargetOrientation
+                    showOrientationSuggestion = false
+                    lastPhysicalOrientation = if (suggestedTargetOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) {
+                        DeviceOrientation.PORTRAIT
+                    } else {
+                        DeviceOrientation.LANDSCAPE
+                    }
+                },
+                containerColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f),
+                contentColor = androidx.compose.ui.graphics.Color.White,
+                shape = CircleShape,
+                modifier = Modifier.size(42.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Smartphone,
+                    contentDescription = "Change orientation suggestion",
+                    modifier = Modifier
+                        .size(22.dp)
+                        .graphicsLayer(rotationZ = rotationAnim.value)
+                )
+            }
+        }
+
+        // Custom Snackbar overlay
+        AnimatedVisibility(
+            visible = snackbarMessage != null,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 90.dp)
+        ) {
+            Card(
+                modifier = Modifier
+                    .padding(horizontal = 24.dp)
+                    .fillMaxWidth(0.8f),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = snackbarMessage ?: "",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
     }
 }
+
+// ─── Gesture HUD Overlay ──────────────────────────────────────────────────────
+/**
+ * Renders real-time feedback panels for the three gesture zones:
+ *  - Brightness  → vertical bar, left-center of screen
+ *  - Volume      → vertical bar, right-center of screen
+ *  - Seek        → rounded pill, exact center of screen
+ *
+ * All three panels are independent [AnimatedVisibility] nodes so they never
+ * conflict with each other or with the main control overlay.
+ */
+@Composable
+private fun GestureHudOverlay(
+    visible: Boolean,
+    gestureType: GestureType?,
+    brightness: Float,
+    volume: Float,
+    seekOffsetMs: Long,
+    seekBasePos: Long   // stable drag-start position — used for "from" timestamp
+) {
+    // Shared card style
+    val cardBg = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.72f)
+    val barWidth = 44.dp
+    val barHeight = 140.dp
+
+    // ── Brightness HUD (left-center) ──────────────────────────────────────────
+    AnimatedVisibility(
+        visible = visible && gestureType == GestureType.BRIGHTNESS,
+        enter = fadeIn(animationSpec = tween(150)),
+        exit  = fadeOut(animationSpec = tween(300)),
+        modifier = Modifier
+            .fillMaxSize()
+            .wrapContentSize(Alignment.CenterStart)
+            .padding(start = 28.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(cardBg)
+                .padding(horizontal = 10.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.WbSunny,
+                contentDescription = "Brightness",
+                tint = androidx.compose.ui.graphics.Color(0xFFFFD54F),
+                modifier = Modifier.size(20.dp)
+            )
+            // Vertical bar: filled bottom-to-top using a Box stack
+            Box(
+                modifier = Modifier
+                    .width(barWidth)
+                    .height(barHeight)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(androidx.compose.ui.graphics.Color.White.copy(alpha = 0.15f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(brightness)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    androidx.compose.ui.graphics.Color(0xFFFFD54F),
+                                    androidx.compose.ui.graphics.Color(0xFFFFF176)
+                                )
+                            )
+                        )
+                        .align(Alignment.BottomCenter)
+                )
+            }
+            Text(
+                text = "${(brightness * 100).toInt()}%",
+                color = androidx.compose.ui.graphics.Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+
+    // ── Volume HUD (right-center) ─────────────────────────────────────────────
+    AnimatedVisibility(
+        visible = visible && gestureType == GestureType.VOLUME,
+        enter = fadeIn(animationSpec = tween(150)),
+        exit  = fadeOut(animationSpec = tween(300)),
+        modifier = Modifier
+            .fillMaxSize()
+            .wrapContentSize(Alignment.CenterEnd)
+            .padding(end = 28.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(cardBg)
+                .padding(horizontal = 10.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = if (volume > 0f) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                contentDescription = "Volume",
+                tint = androidx.compose.ui.graphics.Color(0xFF80D8FF),
+                modifier = Modifier.size(20.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .width(barWidth)
+                    .height(barHeight)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(androidx.compose.ui.graphics.Color.White.copy(alpha = 0.15f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(volume.coerceIn(0f, 1f))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    androidx.compose.ui.graphics.Color(0xFF29B6F6),
+                                    androidx.compose.ui.graphics.Color(0xFF80D8FF)
+                                )
+                            )
+                        )
+                        .align(Alignment.BottomCenter)
+                )
+            }
+            Text(
+                text = "${(volume * 100).toInt()}%",
+                color = androidx.compose.ui.graphics.Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+
+    // ── Seek HUD (exact center of screen) ────────────────────────────────────
+    AnimatedVisibility(
+        visible = visible && gestureType == GestureType.SEEK,
+        enter = fadeIn(animationSpec = tween(150)),
+        exit  = fadeOut(animationSpec = tween(300)),
+        modifier = Modifier
+            .fillMaxSize()
+            .wrapContentSize(Alignment.Center)
+    ) {
+        val seekSecs = seekOffsetMs / 1000L
+        val projectedPos = (seekBasePos + seekOffsetMs).coerceAtLeast(0L)
+        val arrow = if (seekOffsetMs >= 0) Icons.Default.FastForward else Icons.Default.FastRewind
+        val sign  = if (seekOffsetMs >= 0) "+" else ""
+
+        // Column layout: the whole block is centered by wrapContentSize(Center) above.
+        // Icon + delta text share a Row so both are symmetrically centered together;
+        // the timestamp sits below, also centered.
+        Column(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = arrow,
+                    contentDescription = "Seek",
+                    tint = androidx.compose.ui.graphics.Color.White,
+                    modifier = Modifier.size(28.dp)
+                )
+                Text(
+                    text = "${sign}${seekSecs}s",
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                text = "${formatTime(seekBasePos)} → ${formatTime(projectedPos)}",
+                color = androidx.compose.ui.graphics.Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 private fun formatTime(ms: Long): String {
     if (ms <= 0) return "00:00"
@@ -736,5 +2740,132 @@ private fun formatTime(ms: Long): String {
         String.format("%02d:%02d:%02d", hours, minutes, seconds)
     } else {
         String.format("%02d:%02d", minutes, seconds)
+    }
+}
+
+private fun formatDynamicTime(currentMs: Long, totalMs: Long): String {
+    val totalSecs = (totalMs / 1000).coerceAtLeast(0L)
+    val totalHours = totalSecs / 3600
+    val totS = totalSecs % 60
+    val totM = (totalSecs / 60) % 60
+    val totH = totalHours
+
+    val currentSecs = (currentMs / 1000).coerceAtLeast(0L)
+    val curS = currentSecs % 60
+    val curM = (currentSecs / 60) % 60
+    val curH = currentSecs / 3600
+
+    return if (totalHours > 0) {
+        String.format("%02d:%02d:%02d/%02d:%02d:%02d", curH, curM, curS, totH, totM, totS)
+    } else {
+        String.format("%02d:%02d/%02d:%02d", curM, curS, totM, totS)
+    }
+}
+
+private enum class DeviceOrientation {
+    PORTRAIT,
+    LANDSCAPE,
+    UNKNOWN
+}
+
+@androidx.media3.common.util.UnstableApi
+private class CustomMediaSourceFactory(
+    context: android.content.Context,
+    dataSourceFactory: androidx.media3.datasource.DataSource.Factory
+) : androidx.media3.exoplayer.source.MediaSource.Factory {
+    
+    private val defaultFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context)
+        .setDataSourceFactory(dataSourceFactory)
+        .experimentalParseSubtitlesDuringExtraction(false)
+        
+    private val hlsFactory = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
+        .setAllowChunklessPreparation(false)
+
+    override fun createMediaSource(mediaItem: androidx.media3.common.MediaItem): androidx.media3.exoplayer.source.MediaSource {
+        val mimeType = mediaItem.localConfiguration?.mimeType
+        val uriPath = mediaItem.localConfiguration?.uri?.path
+        val isHls = mimeType == androidx.media3.common.MimeTypes.APPLICATION_M3U8 ||
+                uriPath?.endsWith(".m3u8") == true ||
+                uriPath?.contains(".m3u8") == true
+        return if (isHls) {
+            hlsFactory.createMediaSource(mediaItem)
+        } else {
+            defaultFactory.createMediaSource(mediaItem)
+        }
+    }
+
+    override fun setDrmSessionManagerProvider(drmSessionManagerProvider: androidx.media3.exoplayer.drm.DrmSessionManagerProvider): androidx.media3.exoplayer.source.MediaSource.Factory {
+        defaultFactory.setDrmSessionManagerProvider(drmSessionManagerProvider)
+        hlsFactory.setDrmSessionManagerProvider(drmSessionManagerProvider)
+        return this
+    }
+
+    override fun setLoadErrorHandlingPolicy(loadErrorHandlingPolicy: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy): androidx.media3.exoplayer.source.MediaSource.Factory {
+        defaultFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        hlsFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        return this
+    }
+
+    override fun getSupportedTypes(): IntArray {
+        return defaultFactory.supportedTypes
+    }
+}
+
+@androidx.media3.common.util.UnstableApi
+private class ChannelMaskSanitizerAudioProcessor : androidx.media3.common.audio.AudioProcessor {
+    private var pendingOutputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
+    private var outputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
+    private var buffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
+    private var outputBuffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
+    private var inputEnded = false
+
+    override fun configure(inputAudioFormat: androidx.media3.common.audio.AudioProcessor.AudioFormat): androidx.media3.common.audio.AudioProcessor.AudioFormat {
+        pendingOutputFormat = inputAudioFormat
+        return pendingOutputFormat
+    }
+
+    override fun isActive(): Boolean {
+        return pendingOutputFormat != androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
+    }
+
+    override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
+        val remaining = inputBuffer.remaining()
+        if (remaining == 0) {
+            return
+        }
+        if (buffer.capacity() < remaining) {
+            buffer = java.nio.ByteBuffer.allocateDirect(remaining).order(java.nio.ByteOrder.nativeOrder())
+        } else {
+            buffer.clear()
+        }
+        buffer.put(inputBuffer)
+        buffer.flip()
+        outputBuffer = buffer
+    }
+
+    override fun queueEndOfStream() {
+        inputEnded = true
+    }
+
+    override fun getOutput(): java.nio.ByteBuffer {
+        val output = outputBuffer
+        outputBuffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
+        return output
+    }
+
+    override fun isEnded(): Boolean {
+        return inputEnded && outputBuffer === androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
+    }
+
+    override fun flush() {
+        outputBuffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
+        inputEnded = false
+    }
+
+    override fun reset() {
+        flush()
+        buffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
+        pendingOutputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
+        outputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
     }
 }

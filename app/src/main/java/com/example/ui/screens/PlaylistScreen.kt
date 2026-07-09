@@ -25,6 +25,7 @@ import com.example.data.PlaylistItem
 import com.example.data.VideoModel
 import com.example.viewmodel.VideoPlayerViewModel
 import com.example.ui.components.VideoThumbnail
+import java.io.File
 
 @Composable
 fun PlaylistScreen(
@@ -61,7 +62,7 @@ fun PlaylistScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Playlists",
                                 fontSize = 24.sp,
@@ -75,13 +76,17 @@ fun PlaylistScreen(
                             )
                         }
 
-                        Button(
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        FilledIconButton(
                             onClick = { showCreateDialog = true },
+                            modifier = Modifier.testTag("new_playlist_button"),
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("New List")
+                            Icon(
+                                imageVector = Icons.Default.PlaylistAdd,
+                                contentDescription = "New Playlist"
+                            )
                         }
                     }
                 }
@@ -126,7 +131,7 @@ fun PlaylistScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
                     ) {
-                        items(playlists) { playlist ->
+                        items(playlists, key = { it.id }) { playlist ->
                             PlaylistCard(
                                 playlist = playlist,
                                 onClick = { selectedPlaylist = playlist },
@@ -300,7 +305,7 @@ fun PlaylistDetailsView(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${items.size} videos",
+                        text = if (items.size == 1) "1 video" else "${items.size} videos",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                     )
@@ -387,7 +392,7 @@ fun PlaylistDetailsView(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
             ) {
-                items(items) { item ->
+                items(items, key = { it.id }) { item ->
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -445,20 +450,11 @@ fun PlaylistDetailsView(
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 val displayPath = remember(item.urlOrPath) {
-                                    if (item.urlOrPath.contains(".m3u8")) {
+                                    if (item.urlOrPath.contains(".m3u8") || item.urlOrPath.startsWith("http://") || item.urlOrPath.startsWith("https://")) {
                                         "Live Stream (.m3u8)"
                                     } else {
-                                        val cleanPath = item.urlOrPath.substringBeforeLast('/', "")
-                                        if (cleanPath.isNotEmpty()) {
-                                            val index = cleanPath.indexOf("/0/")
-                                            if (index != -1) {
-                                                cleanPath.substring(index + 3).ifEmpty { "Internal Storage" }
-                                            } else {
-                                                cleanPath
-                                            }
-                                        } else {
-                                            "Internal Storage"
-                                        }
+                                        val file = File(item.urlOrPath)
+                                        file.parentFile?.parentFile?.absolutePath ?: "/storage/emulated/0"
                                     }
                                 }
                                 Text(
