@@ -90,7 +90,7 @@ class MainActivity : ComponentActivity() {
                         viewModel.playNext()
                     }
                     "com.example.ACTION_PREV" -> {
-                        viewModel.playPrevious()
+                        viewModel.playPrevious(0L, 0L)
                     }
                 }
             }

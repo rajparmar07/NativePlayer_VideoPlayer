@@ -356,7 +356,7 @@ class VideoPlayerViewModel(
     }
 
     enum class PlaybackCommand {
-        PLAY, PAUSE
+        PLAY, PAUSE, RESTART
     }
 
     private val _playbackCommand = MutableSharedFlow<PlaybackCommand>(extraBufferCapacity = 1)
@@ -371,6 +371,12 @@ class VideoPlayerViewModel(
     fun pause() {
         viewModelScope.launch {
             _playbackCommand.emit(PlaybackCommand.PAUSE)
+        }
+    }
+
+    fun restartCurrent() {
+        viewModelScope.launch {
+            _playbackCommand.emit(PlaybackCommand.RESTART)
         }
     }
 
@@ -462,6 +468,8 @@ data class VideoPlaybackState(
         isSubtitleDisabled: Boolean = true
     ) {
         if (durationMs <= 0) return
+        // Don't save progress for trivially short plays (< 2 seconds)
+        if (progressMs < 2000L) return
         val isWatchedWhole = progressMs >= durationMs - 5000 && progressMs >= (durationMs * 0.95).toLong()
         if (isWatchedWhole) {
             prefs.edit().remove("progress_$urlOrPath").commit()
@@ -728,9 +736,17 @@ data class VideoPlaybackState(
         }
     }
 
-    fun playPrevious() {
+    fun playPrevious(currentPositionMs: Long, durationMs: Long) {
         val queue = _playbackQueue.value
         val currentIndex = _currentQueueIndex.value
+
+        // If video progressed more than 10%, restart the current video
+        if (durationMs > 0 && currentPositionMs > durationMs * 0.10) {
+            restartCurrent()
+            return
+        }
+
+        // Otherwise, go to previous video in queue
         if (queue.isNotEmpty() && currentIndex > 0) {
             val prevIndex = currentIndex - 1
             _currentQueueIndex.value = prevIndex

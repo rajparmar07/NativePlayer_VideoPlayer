@@ -199,13 +199,13 @@ fun LocalLibraryScreen(
             var curr: File? = vParent
             var childUnderCurrent: File? = null
             while (curr != null) {
-                if (curr.absolutePath == currentDir.absolutePath && childUnderCurrent != null) {
+                if (curr?.absolutePath == currentDir.absolutePath && childUnderCurrent != null) {
                     val list = directSubdirs.getOrPut(childUnderCurrent.absolutePath) { mutableListOf() }
                     list.add(video)
                     break
                 }
                 childUnderCurrent = curr
-                curr = curr.parentFile
+                curr = curr?.parentFile
             }
         }
         
@@ -1303,7 +1303,7 @@ fun FolderCard(
         Column(
             modifier = Modifier
                 .weight(1f)
-                .align(Alignment.Top),
+                .align(Alignment.CenterVertically),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
@@ -1460,12 +1460,12 @@ fun LocalVideoCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 8.dp, horizontal = 8.dp),
-            verticalAlignment = Alignment.Top
+            verticalAlignment = Alignment.CenterVertically
         ) {
             // Media thumbnail
             Box(
                 modifier = Modifier
-                    .align(Alignment.Top)
+                    .align(Alignment.CenterVertically)
                     .size(120.dp, 80.dp)
                     .clip(RoundedCornerShape(8.dp))
             ) {
@@ -1518,16 +1518,21 @@ fun LocalVideoCard(
                 if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) {
                     val progressRatio = if (durationMs > 0) (progressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                     if (progressRatio > 0f) {
-                        LinearProgressIndicator(
-                            progress = { progressRatio },
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(4.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .align(Alignment.BottomCenter)
-                                .testTag("video_progress_indicator_${video.id}"),
-                            color = MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                        )
+                                .testTag("video_progress_indicator_${video.id}")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(progressRatio)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                        }
                     }
                 }
             }
@@ -1536,7 +1541,7 @@ fun LocalVideoCard(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .align(Alignment.Top),
+                    .align(Alignment.CenterVertically),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 MiddleEllipsisText(
@@ -1775,16 +1780,21 @@ fun LocalVideoGridCard(
                 if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) {
                     val progressRatio = if (durationMs > 0) (progressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                     if (progressRatio > 0f) {
-                        LinearProgressIndicator(
-                            progress = { progressRatio },
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(4.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .align(Alignment.BottomCenter)
-                                .testTag("video_progress_indicator_${video.id}"),
-                            color = MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                        )
+                                .testTag("video_progress_indicator_${video.id}")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(progressRatio)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                        }
                     }
                 }
             }
@@ -1793,7 +1803,7 @@ fun LocalVideoGridCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp, vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.Start
             ) {
                 val cleanTitle = remember(video.title) { video.title.substringBeforeLast('.') }
                 MiddleEllipsisText(
@@ -1804,7 +1814,7 @@ fun LocalVideoGridCard(
                         fontSize = 14.sp,
                         lineHeight = 18.sp,
                         color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Start
                     ),
                     maxLines = 1
                 )
@@ -1818,7 +1828,7 @@ fun LocalVideoGridCard(
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                         lineHeight = 16.sp,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Start
                     ),
                     maxLines = 1
                 )
@@ -1835,7 +1845,7 @@ fun LocalVideoGridCard(
                     Text(
                         text = detailText,
                         fontSize = 12.sp,
-                        textAlign = TextAlign.Center,
+                        textAlign = TextAlign.Start,
                         color = if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                         style = MaterialTheme.typography.bodySmall.copy(
                             lineHeight = 16.sp,

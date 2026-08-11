@@ -695,6 +695,10 @@ fun PlayerScreen(
             when (command) {
                 VideoPlayerViewModel.PlaybackCommand.PLAY -> exoPlayer.play()
                 VideoPlayerViewModel.PlaybackCommand.PAUSE -> exoPlayer.pause()
+                VideoPlayerViewModel.PlaybackCommand.RESTART -> {
+                    exoPlayer.seekTo(0)
+                    exoPlayer.play()
+                }
             }
         }
     }
@@ -838,6 +842,7 @@ fun PlayerScreen(
                     isPendingPostSwipe = false
                 }
                 if (state == Player.STATE_ENDED) {
+                    saveCurrentProgress()
                     viewModel.playNext()
                 }
             }
@@ -1547,11 +1552,12 @@ fun PlayerScreen(
                         val sideIconTint = MaterialTheme.colorScheme.onSurface
 
                         // 1. Prev Video Button
-                        val isPrevEnabled = currentQueueIndex > 0
+                        val isPrevEnabled = currentQueueIndex > 0 || (duration > 0 && currentPos > duration * 0.10)
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
-                                viewModel.playPrevious()
+                                saveCurrentProgress()
+                                viewModel.playPrevious(exoPlayer.currentPosition, exoPlayer.duration)
                             },
                             enabled = isPrevEnabled,
                             modifier = Modifier
@@ -1697,6 +1703,7 @@ fun PlayerScreen(
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
+                                saveCurrentProgress()
                                 viewModel.playNext()
                             },
                             enabled = isNextEnabled,
