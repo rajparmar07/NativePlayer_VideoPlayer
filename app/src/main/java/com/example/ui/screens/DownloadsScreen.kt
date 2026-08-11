@@ -116,33 +116,6 @@ fun DownloadsScreen(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Header Surface (Sleek Toolbar style)
-            Surface(
-                modifier = Modifier.fillMaxWidth().zIndex(1f),
-                shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 4.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp)
-                ) {
-                    Text(
-                        text = "Downloads",
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    Text(
-                        text = "Download videos from links and play offline",
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                    )
-                }
-            }
-
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 24.dp, top = 20.dp, end = 24.dp, bottom = 80.dp),

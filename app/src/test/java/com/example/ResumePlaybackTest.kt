@@ -155,4 +155,79 @@ class ResumePlaybackTest {
         viewModel.setZoomSensitivity(3.0f) // above max (2.0f)
         assertEquals(2.0f, viewModel.zoomSensitivity.value)
     }
+
+    @Test
+    fun testSaveAndRestoreTrackPreferences() {
+        val videoUrl = "https://example.com/test_video_tracks.mp4"
+
+        // Save progress with audio and subtitle track selections
+        viewModel.saveVideoProgress(
+            urlOrPath = videoUrl,
+            progressMs = 12000L,
+            durationMs = 60000L,
+            audioGroupIndex = 1,
+            audioTrackIndex = 0,
+            audioLanguage = "eng",
+            subtitleGroupIndex = 2,
+            subtitleTrackIndex = 1,
+            subtitleLanguage = "spa",
+            isSubtitleDisabled = false
+        )
+
+        val state = viewModel.getVideoPlaybackState(videoUrl)
+        assertNotNull(state)
+        assertEquals(12000L, state!!.progressMs)
+        assertEquals(60000L, state.durationMs)
+        assertEquals(1, state.audioGroupIndex)
+        assertEquals(0, state.audioTrackIndex)
+        assertEquals("eng", state.audioLanguage)
+        assertEquals(2, state.subtitleGroupIndex)
+        assertEquals(1, state.subtitleTrackIndex)
+        assertEquals("spa", state.subtitleLanguage)
+        assertFalse(state.isSubtitleDisabled)
+    }
+
+    @Test
+    fun testAudioSettings() {
+        // Defaults
+        assertTrue(viewModel.audioFocusEnabled.value)
+        assertTrue(viewModel.pauseOnHeadphonesDisconnectEnabled.value)
+
+        // Toggle Audio Focus setting
+        viewModel.setAudioFocusEnabled(false)
+        assertFalse(viewModel.audioFocusEnabled.value)
+
+        viewModel.setAudioFocusEnabled(true)
+        assertTrue(viewModel.audioFocusEnabled.value)
+
+        // Toggle Pause on Headset Disconnect setting
+        viewModel.setPauseOnHeadphonesDisconnectEnabled(false)
+        assertFalse(viewModel.pauseOnHeadphonesDisconnectEnabled.value)
+
+        viewModel.setPauseOnHeadphonesDisconnectEnabled(true)
+        assertTrue(viewModel.pauseOnHeadphonesDisconnectEnabled.value)
+    }
+
+    @Test
+    fun testButtonSeekSeconds() {
+        // Default value
+        assertEquals(10, viewModel.buttonSeekSeconds.value)
+
+        // Set valid values
+        viewModel.setButtonSeekSeconds(5)
+        assertEquals(5, viewModel.buttonSeekSeconds.value)
+
+        viewModel.setButtonSeekSeconds(15)
+        assertEquals(15, viewModel.buttonSeekSeconds.value)
+
+        viewModel.setButtonSeekSeconds(30)
+        assertEquals(30, viewModel.buttonSeekSeconds.value)
+
+        viewModel.setButtonSeekSeconds(60)
+        assertEquals(60, viewModel.buttonSeekSeconds.value)
+
+        // Invalid fallback defaults to 10
+        viewModel.setButtonSeekSeconds(22)
+        assertEquals(10, viewModel.buttonSeekSeconds.value)
+    }
 }

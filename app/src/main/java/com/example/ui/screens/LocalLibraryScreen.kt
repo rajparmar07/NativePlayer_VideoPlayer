@@ -5,6 +5,11 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -14,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -28,6 +34,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.VectorPainter
+import androidx.compose.ui.graphics.vector.addPathNodes
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -56,6 +68,31 @@ import com.example.ui.components.VideoThumbnail
 import com.example.ui.components.rememberVideoResolution
 
 
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import com.example.ui.components.VideoActionType
+import com.example.ui.components.VideoActionsBottomSheet
+import com.example.ui.components.RenameVideoDialog
+import com.example.ui.components.FileInfoDialog
+import com.example.ui.components.DirectoryPickerDialog
+import com.example.ui.components.FileOperationProgressDialog
+import com.example.ui.components.DeleteConfirmationDialog
+import com.example.ui.components.DuplicateFileDialog
+import com.example.ui.components.GlobalCenteredLoader
+import com.example.ui.components.ManageStoragePermissionDialog
+import com.example.ui.components.hasAllFilesAccessPermission
+import com.example.ui.components.BulkDeleteConfirmationDialog
+import com.example.ui.components.DisplaySettingsDialog
+import com.example.viewmodel.DisplaySettings
+import com.example.viewmodel.GridColumns
+import com.example.viewmodel.ListDisplayMode
+import com.example.viewmodel.ListStyle
+import com.example.viewmodel.SortDirection
+import com.example.viewmodel.SortField
+import com.example.viewmodel.VideoTileInfo
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+
 @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun LocalLibraryScreen(
@@ -69,11 +106,16 @@ fun LocalLibraryScreen(
     val playlists by viewModel.playlists.collectAsState()
     val resumeEnabled by viewModel.resumeFromLastLeftEnabled.collectAsState()
     val videoProgressMap by viewModel.videoProgressMap.collectAsState()
+    val fileOperationState by viewModel.fileOperationState.collectAsState()
 
+    val displaySettings by viewModel.displaySettings.collectAsState()
     val selectedFolder by viewModel.selectedFolder.collectAsState()
+    val selectedTreePath by viewModel.selectedTreePath.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
-    var isSearchingMode by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
+    val showDisplaySettingsDialog by viewModel.showDisplaySettingsDialog.collectAsState()
+
+    val isSearchingMode by viewModel.isSearchingMode.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
 
     val focusRequester = remember { FocusRequester() }
 
@@ -101,30 +143,195 @@ fun LocalLibraryScreen(
         }
     }
 
+    // Memory Tree Base Path & Directory Node Calculation
+    val rootTreePath = remember(localVideos) {
+        if (localVideos.isEmpty()) "/storage/emulated/0"
+        else {
+            val paths = localVideos.map { File(it.urlOrPath).parentFile?.absolutePath ?: "" }.filter { it.isNotEmpty() }
+            if (paths.isEmpty()) "/storage/emulated/0"
+            else {
+                var common = paths.first()
+                for (p in paths) {
+                    while (!p.startsWith(common) && common.isNotEmpty()) {
+                        common = File(common).parentFile?.absolutePath ?: ""
+                    }
+                }
+                var rootCandidate = common.ifEmpty { "/storage/emulated/0" }
+                // Collapse redundant single-child intermediate directories (e.g. /storage/emulated/0) down to first branching folder or video parent
+                while (rootCandidate.isNotEmpty()) {
+                    val hasDirectVids = localVideos.any { File(it.urlOrPath).parentFile?.absolutePath == rootCandidate }
+                    if (hasDirectVids) break
+                    val childSubdirs = localVideos.mapNotNull { video ->
+                        val p = File(video.urlOrPath).parentFile ?: return@mapNotNull null
+                        var curr: File? = p
+                        var child: File? = null
+                        while (curr != null) {
+                            if (curr.absolutePath == rootCandidate && child != null) return@mapNotNull child.absolutePath
+                            child = curr
+                            curr = curr.parentFile
+                        }
+                        null
+                    }.distinct()
+                    if (childSubdirs.size == 1) {
+                        rootCandidate = childSubdirs.first()
+                    } else {
+                        break
+                    }
+                }
+                rootCandidate
+            }
+        }
+    }
+
+    val currentEffectiveTreePath = selectedTreePath ?: rootTreePath
+
+    val canGoBackTree = remember(selectedTreePath, rootTreePath) {
+        selectedTreePath != null && selectedTreePath != rootTreePath && selectedTreePath!!.startsWith(rootTreePath)
+    }
+
+    val memoryTreeSubfolders = remember(localVideos, currentEffectiveTreePath) {
+        val currentDir = File(currentEffectiveTreePath)
+        val directSubdirs = mutableMapOf<String, MutableList<VideoModel>>()
+        
+        localVideos.forEach { video ->
+            val vFile = File(video.urlOrPath)
+            val vParent = vFile.parentFile ?: return@forEach
+            var curr: File? = vParent
+            var childUnderCurrent: File? = null
+            while (curr != null) {
+                if (curr.absolutePath == currentDir.absolutePath && childUnderCurrent != null) {
+                    val list = directSubdirs.getOrPut(childUnderCurrent.absolutePath) { mutableListOf() }
+                    list.add(video)
+                    break
+                }
+                childUnderCurrent = curr
+                curr = curr.parentFile
+            }
+        }
+        
+        directSubdirs.map { (dirPath, vList) ->
+            FolderItem(
+                name = File(dirPath).name,
+                path = dirPath,
+                videoCount = vList.size,
+                totalDurationMs = vList.sumOf { it.duration },
+                totalSize = vList.sumOf { it.size },
+                maxDate = vList.maxOfOrNull { File(it.urlOrPath).lastModified() } ?: 0L,
+                sampleVideos = vList
+            )
+        }
+    }
+
+    val memoryTreeDirectVideos = remember(localVideos, currentEffectiveTreePath) {
+        localVideos.filter { video ->
+            val parent = File(video.urlOrPath).parentFile
+            parent?.absolutePath == currentEffectiveTreePath
+        }
+    }
+
+    val folderItems = remember(groupedVideos) {
+        groupedVideos.map { (folderName, videosInFolder) ->
+            val sampleFile = File(videosInFolder.firstOrNull()?.urlOrPath ?: "")
+            val folderPath = sampleFile.parentFile?.absolutePath ?: "/storage/emulated/0"
+            FolderItem(
+                name = folderName,
+                path = folderPath,
+                videoCount = videosInFolder.size,
+                totalDurationMs = videosInFolder.sumOf { it.duration },
+                totalSize = videosInFolder.sumOf { it.size },
+                maxDate = videosInFolder.maxOfOrNull { File(it.urlOrPath).lastModified() } ?: 0L,
+                sampleVideos = videosInFolder
+            )
+        }
+    }
+
+    // Sorted Lists
+    val sortedFolderItems = remember(folderItems, displaySettings.sortField, displaySettings.sortDirection) {
+        sortFolders(folderItems, displaySettings.sortField, displaySettings.sortDirection)
+    }
+
+    val sortedMemoryTreeSubfolders = remember(memoryTreeSubfolders, displaySettings.sortField, displaySettings.sortDirection) {
+        sortFolders(memoryTreeSubfolders, displaySettings.sortField, displaySettings.sortDirection)
+    }
+
+    val sortedMemoryTreeVideos = remember(memoryTreeDirectVideos, displaySettings.sortField, displaySettings.sortDirection) {
+        sortVideos(memoryTreeDirectVideos, displaySettings.sortField, displaySettings.sortDirection)
+    }
+
+    val sortedVideosInFolder = remember(groupedVideos, selectedFolder, displaySettings.sortField, displaySettings.sortDirection) {
+        val list = groupedVideos[selectedFolder] ?: emptyList()
+        sortVideos(list, displaySettings.sortField, displaySettings.sortDirection)
+    }
+
     // Filter local videos by search query
     val filteredVideos = remember(localVideos, searchQuery) {
         if (searchQuery.isBlank()) {
             emptyList()
         } else {
-            localVideos.filter {
+            val list = localVideos.filter {
                 it.title.contains(searchQuery, ignoreCase = true) ||
                 it.urlOrPath.contains(searchQuery, ignoreCase = true)
             }
+            sortVideos(list, displaySettings.sortField, displaySettings.sortDirection)
         }
     }
 
     // Intercept back press in search mode
     BackHandler(enabled = isSearchingMode) {
-        isSearchingMode = false
-        searchQuery = ""
+        viewModel.setIsSearchingMode(false)
     }
 
-    // Intercept back press in folder details view
-    BackHandler(enabled = selectedFolder != null && !isSearchingMode) {
+    // Intercept back press in folder details view (Folders mode)
+    BackHandler(enabled = selectedFolder != null && displaySettings.displayMode == ListDisplayMode.FOLDERS && !isSearchingMode) {
         viewModel.setSelectedFolder(null)
     }
 
+    // Safety check: if selectedFolder has no videos, reset it to null
+    LaunchedEffect(localVideos, selectedFolder) {
+        if (selectedFolder != null && (groupedVideos[selectedFolder] == null || groupedVideos[selectedFolder]!!.isEmpty())) {
+            viewModel.setSelectedFolder(null)
+        }
+    }
+
+    // Safety check: if selectedTreePath is non-null but has no subfolders/videos, reset it to null
+    LaunchedEffect(localVideos, selectedTreePath) {
+        if (selectedTreePath != null && memoryTreeSubfolders.isEmpty() && memoryTreeDirectVideos.isEmpty()) {
+            viewModel.setSelectedTreePath(null)
+        }
+    }
+
+    // Intercept back press in memory tree view (Memory Tree mode)
+    BackHandler(enabled = canGoBackTree && displaySettings.displayMode == ListDisplayMode.MEMORY_TREE && !isSearchingMode) {
+        val targetParent = resolveParentBranchingPath(selectedTreePath!!, rootTreePath, localVideos)
+        if (targetParent != null && targetParent != selectedTreePath && targetParent != rootTreePath) {
+            viewModel.setSelectedTreePath(targetParent)
+        } else {
+            viewModel.setSelectedTreePath(null)
+        }
+    }
+
     var showPlaylistDialog by remember { mutableStateOf<VideoModel?>(null) }
+    var activeActionVideo by remember { mutableStateOf<VideoModel?>(null) }
+    var activeActionType by remember { mutableStateOf<VideoActionType?>(null) }
+    var showActionsBottomSheet by remember { mutableStateOf(false) }
+    var pendingDuplicateAction by remember { mutableStateOf<Triple<VideoModel, String, VideoActionType>?>(null) }
+    var showManagePermissionDialog by remember { mutableStateOf(false) }
+    val selectedVideoIds by viewModel.selectedVideoIds.collectAsState()
+    val showBulkDeleteDialog by viewModel.showBulkDeleteDialog.collectAsState()
+    val showBulkCopyDialog by viewModel.showBulkCopyDialog.collectAsState()
+    val showBulkMoveDialog by viewModel.showBulkMoveDialog.collectAsState()
+
+    BackHandler(enabled = selectedVideoIds.isNotEmpty()) {
+        viewModel.clearSelectedVideoIds()
+    }
+
+    val dismissActionState = remember {
+        {
+            showActionsBottomSheet = false
+            activeActionVideo = null
+            activeActionType = null
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -137,55 +344,18 @@ fun LocalLibraryScreen(
                 .fillMaxSize()
         ) {
             if (isSearchingMode) {
-                // SEARCH MODE SCREEN
-                Surface(
-                    modifier = Modifier.fillMaxWidth().zIndex(1f),
-                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 4.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        IconButton(
-                            onClick = {
-                                isSearchingMode = false
-                                searchQuery = ""
-                            },
-                            modifier = Modifier.testTag("exit_search_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowBack,
-                                contentDescription = "Exit Search",
-                                tint = MaterialTheme.colorScheme.onBackground
-                            )
-                        }
-                        Text(
-                            text = "Search Videos",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    }
-                }
-
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Auto-focused Search Bar
                 OutlinedTextField(
                     value = searchQuery,
-                    onValueChange = { searchQuery = it },
+                    onValueChange = { viewModel.setSearchQuery(it) },
                     placeholder = { Text("Search by video name or path...") },
                     singleLine = true,
                     leadingIcon = { Icon(imageVector = Icons.Default.Search, contentDescription = null) },
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = "" }) {
+                            IconButton(onClick = { viewModel.setSearchQuery("") }) {
                                 Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear search")
                             }
                         }
@@ -245,12 +415,17 @@ fun LocalLibraryScreen(
                     ) {
                         items(filteredVideos, key = { it.id }) { video ->
                             val progressData = videoProgressMap[video.urlOrPath]
+                            val isSelected = selectedVideoIds.contains(video.id)
                             LocalVideoCard(
                                 video = video,
                                 searchQuery = searchQuery,
                                 resumeEnabled = resumeEnabled,
                                 progressMs = progressData?.first ?: 0L,
                                 durationMs = progressData?.second ?: video.duration,
+                                isMultiSelectMode = selectedVideoIds.isNotEmpty(),
+                                 onToggleSelect = {
+                                    viewModel.toggleSelectVideoId(video.id)
+                                },
                                 onPlay = {
                                     val idx = filteredVideos.indexOf(video)
                                     viewModel.playPlaylist(filteredVideos, idx)
@@ -258,103 +433,17 @@ fun LocalLibraryScreen(
                                 },
                                 onAddToPlaylist = {
                                     showPlaylistDialog = video
+                                },
+                                onLongClick = remember(video.id) {
+                                    {
+                                        viewModel.toggleSelectVideoId(video.id)
+                                    }
                                 }
                             )
                         }
                     }
                 }
             } else {
-                // NORMAL FOLDER/VIDEO SCREEN
-                // Elevated Normal Toolbar
-                Surface(
-                    modifier = Modifier.fillMaxWidth().zIndex(1f),
-                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 4.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            if (selectedFolder != null) {
-                                IconButton(
-                                    onClick = { viewModel.setSelectedFolder(null) },
-                                    modifier = Modifier.testTag("back_to_folders_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowBack,
-                                        contentDescription = "Back to Folders",
-                                        tint = MaterialTheme.colorScheme.onBackground
-                                    )
-                                }
-                            }
-                            Column {
-                                Text(
-                                    text = selectedFolder ?: "Local Media",
-                                    fontSize = 24.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onBackground,
-                                    maxLines = 1
-                                )
-                                Text(
-                                    text = if (selectedFolder != null) {
-                                        val count = groupedVideos[selectedFolder]?.size ?: 0
-                                        if (count == 1) "1 video in folder" else "$count videos in folder"
-                                    } else {
-                                        val count = localVideos.size
-                                        if (count == 1) "1 video on device" else "$count videos on device"
-                                    },
-                                    fontSize = 14.sp,
-                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                                )
-                            }
-                        }
-
-                        // Toolbar actions container
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Layout Switcher (Always visible in folder overview and video lists)
-                            IconButton(
-                                onClick = { viewModel.setGridView(!isGridView) },
-                                modifier = Modifier
-                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
-                                    .testTag("toggle_layout_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
-                                    contentDescription = "Toggle Grid/List View",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-
-                            // Settings Icon (leads to general settings screen overlay)
-                            IconButton(
-                                onClick = { onNavigateToSettings() },
-                                modifier = Modifier
-                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
-                                    .testTag("settings_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Settings",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                    }
-                }
-
                 if (!permissionState.status.isGranted) {
                     // Permission request UI
                     Box(
@@ -398,24 +487,8 @@ fun LocalLibraryScreen(
                             }
                         }
                     }
-                } else if (isScanning) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp)
-                            .weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Scanning Device Storage...",
-                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
+                } else if (isScanning && localVideos.isEmpty()) {
+                    GlobalCenteredLoader()
                 } else if (localVideos.isEmpty()) {
                     Box(
                         modifier = Modifier
@@ -451,149 +524,305 @@ fun LocalLibraryScreen(
                         }
                     }
                 } else {
-                    AnimatedContent(
-                        targetState = selectedFolder,
-                        transitionSpec = {
-                            if (targetState != null) {
-                                // Navigate forward (Folder -> Videos): Slide in from right, fade out folder list slightly to left
-                                (slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)))
-                                    .togetherWith(slideOutHorizontally(targetOffsetX = { -it / 3 }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300)))
-                            } else {
-                                // Navigate backward (Videos -> Folder): Slide out to right, slide folder list back in from left
-                                (slideInHorizontally(initialOffsetX = { -it / 3 }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)))
-                                    .togetherWith(slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300)))
-                            }
-                        },
-                        label = "folder_navigation_animation",
-                        modifier = Modifier.weight(1f)
-                    ) { folder ->
-                        if (folder == null) {
-                            // Folder Listing Overview
-                            val folderList = groupedVideos.keys.toList().sorted()
-                            
+                    PullToRefreshBox(
+                        isRefreshing = isScanning,
+                        onRefresh = { viewModel.scanLocalVideos(context) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        val isGridMode = displaySettings.listStyle == ListStyle.GRID
+                        val gridColsCount = displaySettings.gridColumns.count
+
+                        if (displaySettings.displayMode == ListDisplayMode.MEMORY_TREE) {
+                            // ── MEMORY TREE MODE RENDERING ─────────────────────────────────
                             AnimatedContent(
-                                targetState = isGridView,
+                                targetState = selectedTreePath,
                                 transitionSpec = {
-                                    (fadeIn(animationSpec = tween(300, delayMillis = 90)) + 
-                                     scaleIn(initialScale = 0.95f, animationSpec = tween(300, delayMillis = 90)))
-                                        .togetherWith(fadeOut(animationSpec = tween(90)))
-                                },
-                                label = "folder_layout_animation",
-                                modifier = Modifier.fillMaxSize()
-                            ) { targetIsGrid ->
-                                if (targetIsGrid) {
-                                    LazyVerticalGrid(
-                                        columns = GridCells.Adaptive(minSize = 100.dp),
-                                        modifier = Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
-                                    ) {
-                                        items(folderList, key = { it }) { f ->
-                                            val videoCount = groupedVideos[f]?.size ?: 0
-                                            FolderGridCard(
-                                                folderName = f,
-                                                videoCount = videoCount,
-                                                onClick = { viewModel.setSelectedFolder(f) }
-                                            )
-                                        }
+                                    val isNavigatingDeeper = targetState != null && (initialState == null || targetState!!.length > initialState!!.length)
+                                    if (isNavigatingDeeper) {
+                                        (slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)))
+                                            .togetherWith(slideOutHorizontally(targetOffsetX = { -it / 3 }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300)))
+                                    } else {
+                                        (slideInHorizontally(initialOffsetX = { -it / 3 }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)))
+                                            .togetherWith(slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300)))
                                     }
-                                } else {
-                                    LazyColumn(
-                                        modifier = Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(5.dp),
-                                        contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
-                                    ) {
-                                        items(folderList, key = { it }) { f ->
-                                            val videosInFolder = groupedVideos[f] ?: emptyList()
-                                            val videoCount = videosInFolder.size
-                                            val folderPath = remember(videosInFolder) {
-                                                if (videosInFolder.isNotEmpty()) {
-                                                    val file = File(videosInFolder.first().urlOrPath)
-                                                    file.parentFile?.parentFile?.absolutePath ?: "/storage/emulated/0"
-                                                } else {
-                                                    "/storage/emulated/0"
-                                                }
-                                            }
-                                            val totalDurationMs = remember(videosInFolder) {
-                                                videosInFolder.sumOf { it.duration }
-                                            }
-                                            val totalDurationText = remember(totalDurationMs) {
-                                                formatTotalDuration(totalDurationMs)
-                                            }
-                                            FolderCard(
-                                                folderName = f,
-                                                folderPath = folderPath,
-                                                videoCount = videoCount,
-                                                totalDurationText = totalDurationText,
-                                                onClick = { viewModel.setSelectedFolder(f) }
+                                },
+                                label = "tree_navigation_slide_animation",
+                                modifier = Modifier.fillMaxSize()
+                            ) { _ ->
+                                AnimatedContent(
+                                    targetState = displaySettings,
+                                    transitionSpec = {
+                                        (fadeIn(animationSpec = tween(350, easing = LinearOutSlowInEasing)) + 
+                                         scaleIn(initialScale = 0.94f, animationSpec = spring(stiffness = Spring.StiffnessLow)))
+                                            .togetherWith(
+                                                fadeOut(animationSpec = tween(200, easing = FastOutLinearInEasing)) + 
+                                                scaleOut(targetScale = 0.96f, animationSpec = tween(200))
                                             )
+                                    },
+                                    label = "memory_tree_layout_animation",
+                                    modifier = Modifier.fillMaxSize()
+                                ) { targetSettings ->
+                                    val targetIsGrid = targetSettings.listStyle == ListStyle.GRID
+                                    val targetColsCount = targetSettings.gridColumns.count
+                                    if (targetIsGrid) {
+                                        LazyVerticalGrid(
+                                            columns = GridCells.Fixed(targetColsCount),
+                                            modifier = Modifier.fillMaxSize(),
+                                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
+                                        ) {
+                                            // Render subfolders first
+                                            items(sortedMemoryTreeSubfolders, key = { "folder_${it.path}" }) { f ->
+                                                FolderGridCard(
+                                                    folderName = f.name,
+                                                    videoCount = f.videoCount,
+                                                    onClick = { viewModel.setSelectedTreePath(resolveDeepestSingleChildPath(f.path, localVideos)) }
+                                                )
+                                            }
+
+                                            // Render direct video files
+                                            items(sortedMemoryTreeVideos, key = { "vid_${it.id}" }) { video ->
+                                                val progressData = videoProgressMap[video.urlOrPath]
+                                                val isSelected = selectedVideoIds.contains(video.id)
+                                                LocalVideoGridCard(
+                                                    video = video,
+                                                    resumeEnabled = resumeEnabled,
+                                                    progressMs = progressData?.first ?: 0L,
+                                                    durationMs = progressData?.second ?: video.duration,
+                                                    tileInfo = displaySettings.videoTileInfo,
+                                                    isMultiSelectMode = selectedVideoIds.isNotEmpty(),
+                                                    isSelected = isSelected,
+                                                    onToggleSelect = {
+                                                        viewModel.toggleSelectVideoId(video.id)
+                                                    },
+                                                    onPlay = {
+                                                        val idx = sortedMemoryTreeVideos.indexOf(video)
+                                                        viewModel.playPlaylist(sortedMemoryTreeVideos, idx)
+                                                        onNavigateToPlayer()
+                                                    },
+                                                    onAddToPlaylist = {
+                                                        showPlaylistDialog = video
+                                                    },
+                                                    onLongClick = remember(video.id) {
+                                                        {
+                                                            viewModel.toggleSelectVideoId(video.id)
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        LazyColumn(
+                                            modifier = Modifier.fillMaxSize(),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                                            contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
+                                        ) {
+                                            // Render subfolders first
+                                            items(sortedMemoryTreeSubfolders, key = { "folder_${it.path}" }) { f ->
+                                                FolderCard(
+                                                    folderName = f.name,
+                                                    folderPath = f.path,
+                                                    videoCount = f.videoCount,
+                                                    totalDurationText = formatTotalDuration(f.totalDurationMs),
+                                                    onClick = { viewModel.setSelectedTreePath(f.path) }
+                                                )
+                                            }
+
+                                            // Render direct video files
+                                            items(sortedMemoryTreeVideos, key = { "vid_${it.id}" }) { video ->
+                                                val progressData = videoProgressMap[video.urlOrPath]
+                                                val isSelected = selectedVideoIds.contains(video.id)
+                                                LocalVideoCard(
+                                                    video = video,
+                                                    resumeEnabled = resumeEnabled,
+                                                    progressMs = progressData?.first ?: 0L,
+                                                    durationMs = progressData?.second ?: video.duration,
+                                                    tileInfo = displaySettings.videoTileInfo,
+                                                    isMultiSelectMode = selectedVideoIds.isNotEmpty(),
+                                                    isSelected = isSelected,
+                                                    onToggleSelect = {
+                                                        viewModel.toggleSelectVideoId(video.id)
+                                                    },
+                                                    onPlay = {
+                                                        val idx = sortedMemoryTreeVideos.indexOf(video)
+                                                        viewModel.playPlaylist(sortedMemoryTreeVideos, idx)
+                                                        onNavigateToPlayer()
+                                                    },
+                                                    onAddToPlaylist = {
+                                                        showPlaylistDialog = video
+                                                    },
+                                                    onLongClick = remember(video.id) {
+                                                        {
+                                                            viewModel.toggleSelectVideoId(video.id)
+                                                        }
+                                                    }
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             }
                         } else {
-                            // Nested Video List inside selected folder
-                            val videosInFolder = groupedVideos[folder] ?: emptyList()
-                            
+                            // ── FOLDERS MODE RENDERING ──────────────────────────────────────
                             AnimatedContent(
-                                targetState = isGridView,
+                                targetState = selectedFolder,
                                 transitionSpec = {
-                                    (fadeIn(animationSpec = tween(300, delayMillis = 90)) + 
-                                     scaleIn(initialScale = 0.95f, animationSpec = tween(300, delayMillis = 90)))
-                                        .togetherWith(fadeOut(animationSpec = tween(90)))
+                                    if (targetState != null) {
+                                        (slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)))
+                                            .togetherWith(slideOutHorizontally(targetOffsetX = { -it / 3 }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300)))
+                                    } else {
+                                        (slideInHorizontally(initialOffsetX = { -it / 3 }, animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)))
+                                            .togetherWith(slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) + fadeOut(animationSpec = tween(300)))
+                                    }
                                 },
-                                label = "videos_layout_animation",
+                                label = "folder_navigation_animation",
                                 modifier = Modifier.fillMaxSize()
-                            ) { targetIsGrid ->
-                                if (targetIsGrid) {
-                                    LazyVerticalGrid(
-                                        columns = GridCells.Adaptive(minSize = 150.dp),
-                                        modifier = Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
-                                    ) {
-                                        items(videosInFolder, key = { it.id }) { video ->
-                                            val progressData = videoProgressMap[video.urlOrPath]
-                                            LocalVideoGridCard(
-                                                video = video,
-                                                resumeEnabled = resumeEnabled,
-                                                progressMs = progressData?.first ?: 0L,
-                                                durationMs = progressData?.second ?: video.duration,
-                                                onPlay = {
-                                                    val idx = videosInFolder.indexOf(video)
-                                                    viewModel.playPlaylist(videosInFolder, idx)
-                                                    onNavigateToPlayer()
-                                                },
-                                                onAddToPlaylist = {
-                                                    showPlaylistDialog = video
+                            ) { folder ->
+                                if (folder == null) {
+                                    // Folder Listing Overview
+                                    AnimatedContent(
+                                        targetState = displaySettings,
+                                        transitionSpec = {
+                                            (fadeIn(animationSpec = tween(350, easing = LinearOutSlowInEasing)) + 
+                                             scaleIn(initialScale = 0.94f, animationSpec = spring(stiffness = Spring.StiffnessLow)))
+                                                .togetherWith(
+                                                    fadeOut(animationSpec = tween(200, easing = FastOutLinearInEasing)) + 
+                                                    scaleOut(targetScale = 0.96f, animationSpec = tween(200))
+                                                )
+                                        },
+                                        label = "folder_layout_animation",
+                                        modifier = Modifier.fillMaxSize()
+                                    ) { targetSettings ->
+                                        val targetIsGrid = targetSettings.listStyle == ListStyle.GRID
+                                        val targetColsCount = targetSettings.gridColumns.count
+                                        if (targetIsGrid) {
+                                            LazyVerticalGrid(
+                                                columns = GridCells.Fixed(targetColsCount),
+                                                modifier = Modifier.fillMaxSize(),
+                                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
+                                            ) {
+                                                items(sortedFolderItems, key = { it.name }) { f ->
+                                                    FolderGridCard(
+                                                        folderName = f.name,
+                                                        videoCount = f.videoCount,
+                                                        onClick = { viewModel.setSelectedFolder(f.name) }
+                                                    )
                                                 }
-                                            )
+                                            }
+                                        } else {
+                                            LazyColumn(
+                                                modifier = Modifier.fillMaxSize(),
+                                                verticalArrangement = Arrangement.spacedBy(5.dp),
+                                                contentPadding = PaddingValues(start = 10.dp, top = 15.dp, end = 10.dp, bottom = 80.dp)
+                                            ) {
+                                                items(sortedFolderItems, key = { it.name }) { f ->
+                                                    FolderCard(
+                                                        folderName = f.name,
+                                                        folderPath = f.path,
+                                                        videoCount = f.videoCount,
+                                                        totalDurationText = formatTotalDuration(f.totalDurationMs),
+                                                        onClick = { viewModel.setSelectedFolder(f.name) }
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
-                                    LazyColumn(
-                                        modifier = Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(0.dp),
-                                        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
-                                    ) {
-                                        items(videosInFolder, key = { it.id }) { video ->
-                                            val progressData = videoProgressMap[video.urlOrPath]
-                                            LocalVideoCard(
-                                                video = video,
-                                                resumeEnabled = resumeEnabled,
-                                                progressMs = progressData?.first ?: 0L,
-                                                durationMs = progressData?.second ?: video.duration,
-                                                onPlay = {
-                                                    val idx = videosInFolder.indexOf(video)
-                                                    viewModel.playPlaylist(videosInFolder, idx)
-                                                    onNavigateToPlayer()
-                                                },
-                                                onAddToPlaylist = {
-                                                    showPlaylistDialog = video
+                                    // Nested Video List inside selected folder
+                                    AnimatedContent(
+                                        targetState = displaySettings,
+                                        transitionSpec = {
+                                            (fadeIn(animationSpec = tween(350, easing = LinearOutSlowInEasing)) + 
+                                             scaleIn(initialScale = 0.94f, animationSpec = spring(stiffness = Spring.StiffnessLow)))
+                                                .togetherWith(
+                                                    fadeOut(animationSpec = tween(200, easing = FastOutLinearInEasing)) + 
+                                                    scaleOut(targetScale = 0.96f, animationSpec = tween(200))
+                                                )
+                                        },
+                                        label = "videos_layout_animation",
+                                        modifier = Modifier.fillMaxSize()
+                                    ) { targetSettings ->
+                                        val targetIsGrid = targetSettings.listStyle == ListStyle.GRID
+                                        val targetColsCount = targetSettings.gridColumns.count
+                                        if (targetIsGrid) {
+                                            LazyVerticalGrid(
+                                                columns = GridCells.Fixed(targetColsCount),
+                                                modifier = Modifier.fillMaxSize(),
+                                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
+                                            ) {
+                                                items(sortedVideosInFolder, key = { it.id }) { video ->
+                                                    val progressData = videoProgressMap[video.urlOrPath]
+                                                    val isSelected = selectedVideoIds.contains(video.id)
+                                                    LocalVideoGridCard(
+                                                        video = video,
+                                                        resumeEnabled = resumeEnabled,
+                                                        progressMs = progressData?.first ?: 0L,
+                                                        durationMs = progressData?.second ?: video.duration,
+                                                        tileInfo = displaySettings.videoTileInfo,
+                                                        isMultiSelectMode = selectedVideoIds.isNotEmpty(),
+                                                        isSelected = isSelected,
+                                                        onToggleSelect = {
+                                                            viewModel.toggleSelectVideoId(video.id)
+                                                        },
+                                                        onPlay = {
+                                                            val idx = sortedVideosInFolder.indexOf(video)
+                                                            viewModel.playPlaylist(sortedVideosInFolder, idx)
+                                                            onNavigateToPlayer()
+                                                        },
+                                                        onAddToPlaylist = {
+                                                            showPlaylistDialog = video
+                                                        },
+                                                        onLongClick = remember(video.id) {
+                                                            {
+                                                                viewModel.toggleSelectVideoId(video.id)
+                                                            }
+                                                        }
+                                                    )
                                                 }
-                                            )
+                                            }
+                                        } else {
+                                            LazyColumn(
+                                                modifier = Modifier.fillMaxSize(),
+                                                verticalArrangement = Arrangement.spacedBy(0.dp),
+                                                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp)
+                                            ) {
+                                                items(sortedVideosInFolder, key = { it.id }) { video ->
+                                                    val progressData = videoProgressMap[video.urlOrPath]
+                                                    val isSelected = selectedVideoIds.contains(video.id)
+                                                    LocalVideoCard(
+                                                        video = video,
+                                                        resumeEnabled = resumeEnabled,
+                                                        progressMs = progressData?.first ?: 0L,
+                                                        durationMs = progressData?.second ?: video.duration,
+                                                        tileInfo = displaySettings.videoTileInfo,
+                                                        isMultiSelectMode = selectedVideoIds.isNotEmpty(),
+                                                        isSelected = isSelected,
+                                                        onToggleSelect = {
+                                                            viewModel.toggleSelectVideoId(video.id)
+                                                        },
+                                                        onPlay = {
+                                                            val idx = sortedVideosInFolder.indexOf(video)
+                                                            viewModel.playPlaylist(sortedVideosInFolder, idx)
+                                                            onNavigateToPlayer()
+                                                        },
+                                                        onAddToPlaylist = {
+                                                            showPlaylistDialog = video
+                                                        },
+                                                        onLongClick = remember(video.id) {
+                                                            {
+                                                                viewModel.toggleSelectVideoId(video.id)
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -604,22 +833,25 @@ fun LocalLibraryScreen(
             }
         }
 
-        // Floating Action Button for Search (replaces refresh button completely)
+        // Floating Action Button for Search (Inside root Box)
         if (permissionState.status.isGranted && !isScanning && !isSearchingMode) {
             FloatingActionButton(
                 onClick = {
-                    isSearchingMode = true
+                    viewModel.setIsSearchingMode(true)
                 },
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = CircleShape,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(16.dp)
+                    .padding(bottom = 16.dp, end = 16.dp)
+                    .size(56.dp)
                     .testTag("search_fab")
             ) {
                 Icon(
                     imageVector = Icons.Default.Search,
-                    contentDescription = "Search Videos"
+                    contentDescription = "Search Videos",
+                    modifier = Modifier.size(24.dp)
                 )
             }
         }
@@ -689,6 +921,358 @@ fun LocalLibraryScreen(
             }
         )
     }
+
+    // Single Video Long-Press Action Handlers
+    if (showActionsBottomSheet && activeActionVideo != null) {
+        VideoActionsBottomSheet(
+            video = activeActionVideo!!,
+            onDismissRequest = dismissActionState,
+            onActionSelected = { type ->
+                if ((type == VideoActionType.MOVE || type == VideoActionType.DELETE) && !hasAllFilesAccessPermission()) {
+                    showActionsBottomSheet = false
+                    showManagePermissionDialog = true
+                } else {
+                    activeActionType = type
+                    showActionsBottomSheet = false
+                }
+            }
+        )
+    }
+
+    if (showManagePermissionDialog) {
+        ManageStoragePermissionDialog(
+            onDismissRequest = { showManagePermissionDialog = false }
+        )
+    }
+
+    if (!showActionsBottomSheet && activeActionVideo != null && activeActionType == VideoActionType.RENAME) {
+        RenameVideoDialog(
+            video = activeActionVideo!!,
+            onDismissRequest = dismissActionState,
+            onConfirmRename = { newName ->
+                val v = activeActionVideo!!
+                dismissActionState()
+                viewModel.renameVideo(context, v, newName) { success, err ->
+                    if (success) {
+                        Toast.makeText(context, "Renamed successfully", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, err ?: "Rename failed", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        )
+    }
+
+    if (!showActionsBottomSheet && activeActionVideo != null && activeActionType == VideoActionType.FILE_INFO) {
+        FileInfoDialog(
+            video = activeActionVideo!!,
+            onDismissRequest = dismissActionState
+        )
+    }
+
+    if (!showActionsBottomSheet && activeActionVideo != null && (activeActionType == VideoActionType.COPY || activeActionType == VideoActionType.MOVE)) {
+        DirectoryPickerDialog(
+            actionType = activeActionType!!,
+            video = activeActionVideo!!,
+            onDismissRequest = dismissActionState,
+            onFolderSelected = { targetFolder ->
+                val v = activeActionVideo!!
+                val currentAction = activeActionType!!
+                dismissActionState()
+
+                val srcFile = File(v.urlOrPath)
+                val targetFile = File(targetFolder, srcFile.name)
+
+                if (targetFile.exists()) {
+                    pendingDuplicateAction = Triple(v, targetFolder, currentAction)
+                } else {
+                    when (currentAction) {
+                        VideoActionType.COPY -> {
+                            viewModel.copyVideoWithProgress(context, v, targetFolder, overwrite = false) { success, err ->
+                                if (success) {
+                                    Toast.makeText(context, "Video copied successfully", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, err ?: "Copy failed", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                        VideoActionType.MOVE -> {
+                            val currentFolderToChecking = selectedFolder
+                            val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                            viewModel.moveVideoWithProgress(context, v, targetFolder, overwrite = false) { success, err ->
+                                if (success) {
+                                    Toast.makeText(context, "Video moved successfully", Toast.LENGTH_SHORT).show()
+                                    if (currentFolderToChecking != null && count <= 1) {
+                                        viewModel.setSelectedFolder(null)
+                                    }
+                                } else {
+                                    Toast.makeText(context, err ?: "Move failed", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                        else -> {}
+                    }
+                }
+            }
+        )
+    }
+
+    if (pendingDuplicateAction != null) {
+        val (v, targetFolder, actionType) = pendingDuplicateAction!!
+        DuplicateFileDialog(
+            video = v,
+            targetFolderPath = targetFolder,
+            actionType = actionType,
+            onDismissRequest = { pendingDuplicateAction = null },
+            onReplace = {
+                pendingDuplicateAction = null
+                when (actionType) {
+                    VideoActionType.COPY -> {
+                        viewModel.copyVideoWithProgress(context, v, targetFolder, overwrite = true) { success, err ->
+                            if (success) {
+                                Toast.makeText(context, "Video copied and overwritten", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, err ?: "Copy failed", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    VideoActionType.MOVE -> {
+                        val currentFolderToChecking = selectedFolder
+                        val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                        viewModel.moveVideoWithProgress(context, v, targetFolder, overwrite = true) { success, err ->
+                            if (success) {
+                                Toast.makeText(context, "Video moved and overwritten", Toast.LENGTH_SHORT).show()
+                                if (currentFolderToChecking != null && count <= 1) {
+                                    viewModel.setSelectedFolder(null)
+                                }
+                            } else {
+                                Toast.makeText(context, err ?: "Move failed", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    else -> {}
+                }
+            },
+            onKeepBoth = {
+                pendingDuplicateAction = null
+                when (actionType) {
+                    VideoActionType.COPY -> {
+                        viewModel.copyVideoWithProgress(context, v, targetFolder, overwrite = false) { success, err ->
+                            if (success) {
+                                Toast.makeText(context, "Video copied (renamed)", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, err ?: "Copy failed", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    VideoActionType.MOVE -> {
+                        val currentFolderToChecking = selectedFolder
+                        val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                        viewModel.moveVideoWithProgress(context, v, targetFolder, overwrite = false) { success, err ->
+                            if (success) {
+                                Toast.makeText(context, "Video moved (renamed)", Toast.LENGTH_SHORT).show()
+                                if (currentFolderToChecking != null && count <= 1) {
+                                    viewModel.setSelectedFolder(null)
+                                }
+                            } else {
+                                Toast.makeText(context, err ?: "Move failed", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    else -> {}
+                }
+            }
+        )
+    }
+
+    // Real-Time File Operation Progress Dialog
+    if (fileOperationState != null && fileOperationState!!.isRunning) {
+        FileOperationProgressDialog(state = fileOperationState!!)
+    }
+
+    if (!showActionsBottomSheet && activeActionVideo != null && activeActionType == VideoActionType.DELETE) {
+        DeleteConfirmationDialog(
+            video = activeActionVideo!!,
+            onDismissRequest = dismissActionState,
+            onConfirmDelete = {
+                val v = activeActionVideo!!
+                val currentFolderToChecking = selectedFolder
+                val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                dismissActionState()
+                viewModel.deleteVideo(context, v) { success, err ->
+                    if (success) {
+                        Toast.makeText(context, "Video deleted", Toast.LENGTH_SHORT).show()
+                        if (currentFolderToChecking != null && count <= 1) {
+                            viewModel.setSelectedFolder(null)
+                        }
+                    } else {
+                        Toast.makeText(context, err ?: "Delete failed", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        )
+    }
+
+    if (showBulkCopyDialog && selectedVideoIds.isNotEmpty()) {
+        val currentList = if (selectedFolder != null) (groupedVideos[selectedFolder] ?: emptyList()) else localVideos
+        val selectedVideos = currentList.filter { selectedVideoIds.contains(it.id) }
+        if (selectedVideos.isNotEmpty()) {
+            DirectoryPickerDialog(
+                actionType = VideoActionType.COPY,
+                video = selectedVideos.first(),
+                onDismissRequest = { viewModel.setShowBulkCopyDialog(false) },
+                onFolderSelected = { targetFolder ->
+                    viewModel.setShowBulkCopyDialog(false)
+                    viewModel.copyMultipleVideosWithProgress(context, selectedVideos, targetFolder) { success, err ->
+                        if (success) {
+                            Toast.makeText(context, "${selectedVideos.size} videos copied", Toast.LENGTH_SHORT).show()
+                            viewModel.clearSelectedVideoIds()
+                        } else {
+                            Toast.makeText(context, err ?: "Bulk copy failed", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    if (showBulkMoveDialog && selectedVideoIds.isNotEmpty()) {
+        val currentList = if (selectedFolder != null) (groupedVideos[selectedFolder] ?: emptyList()) else localVideos
+        val selectedVideos = currentList.filter { selectedVideoIds.contains(it.id) }
+        if (selectedVideos.isNotEmpty()) {
+            DirectoryPickerDialog(
+                actionType = VideoActionType.MOVE,
+                video = selectedVideos.first(),
+                onDismissRequest = { viewModel.setShowBulkMoveDialog(false) },
+                onFolderSelected = { targetFolder ->
+                    viewModel.setShowBulkMoveDialog(false)
+                    val currentFolderToChecking = selectedFolder
+                    val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                    val moveCount = selectedVideos.size
+                    viewModel.moveMultipleVideosWithProgress(context, selectedVideos, targetFolder) { success, err ->
+                        if (success) {
+                            Toast.makeText(context, "$moveCount videos moved", Toast.LENGTH_SHORT).show()
+                            viewModel.clearSelectedVideoIds()
+                            if (currentFolderToChecking != null && count <= moveCount) {
+                                viewModel.setSelectedFolder(null)
+                            }
+                        } else {
+                            Toast.makeText(context, err ?: "Bulk move failed", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    if (showBulkDeleteDialog && selectedVideoIds.isNotEmpty()) {
+        val currentList = if (selectedFolder != null) (groupedVideos[selectedFolder] ?: emptyList()) else localVideos
+        val selectedVideos = currentList.filter { selectedVideoIds.contains(it.id) }
+        BulkDeleteConfirmationDialog(
+            count = selectedVideos.size,
+            onDismissRequest = { viewModel.setShowBulkDeleteDialog(false) },
+            onConfirmDelete = {
+                viewModel.setShowBulkDeleteDialog(false)
+                val currentFolderToChecking = selectedFolder
+                val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                val deleteCount = selectedVideos.size
+                viewModel.deleteMultipleVideos(context, selectedVideos) { success, err ->
+                    if (success) {
+                        Toast.makeText(context, "$deleteCount videos deleted", Toast.LENGTH_SHORT).show()
+                        viewModel.clearSelectedVideoIds()
+                        if (currentFolderToChecking != null && count <= deleteCount) {
+                            viewModel.setSelectedFolder(null)
+                        }
+                    } else {
+                        Toast.makeText(context, err ?: "Bulk delete failed", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        )
+    }
+
+    // Display & Layout Settings Dialog (Uniform Bottom Sheet)
+    if (showDisplaySettingsDialog) {
+        DisplaySettingsDialog(
+            initialSettings = displaySettings,
+            onDismissRequest = { viewModel.setShowDisplaySettingsDialog(false) },
+            onApply = { updatedSettings ->
+                viewModel.updateDisplaySettings(updatedSettings)
+            }
+        )
+    }
+}
+
+private const val FOLDER_PATH_1 = "M159.95,0.5C174.95,0.59 185.99,4.32 196.78,14.6V14.6C198.52,16.38 200.1,18.26 201.71,20.2L201.71,20.21C205.93,25.13 208.1,27.66 210.71,29.48C213.31,31.31 216.35,32.42 222.27,34.59L222.33,34.62L222.41,34.62C226.98,34.9 231.51,34.83 236.07,34.7C238.11,34.7 240.15,34.7 242.19,34.72H242.19C247.71,34.73 253.22,34.65 258.73,34.55L258.73,34.55C261.62,34.51 264.51,34.49 267.4,34.48L276.08,34.47C287.02,34.46 297.96,34.36 308.9,34.24C324.97,34.05 341.03,33.99 357.1,33.93C359.47,33.92 361.85,33.91 364.22,33.9C365.38,33.9 366.54,33.89 367.73,33.89C374.61,33.86 381.48,33.81 388.36,33.73C392.63,33.69 396.91,33.66 401.18,33.62H401.18C403.16,33.61 405.14,33.58 407.12,33.55C409.82,33.52 412.52,33.49 415.23,33.48H415.23C416.01,33.46 416.79,33.45 417.59,33.43C423.45,33.42 428.81,34.37 433.33,38.2C433.76,38.76 434.19,39.32 434.63,39.9L434.64,39.91C435.09,40.48 435.54,41.06 436.01,41.65C438.31,44.96 438.08,47.38 438.07,51.6V51.6C438.07,52.1 438.07,52.34 438.06,52.59L438.06,53.61C438.06,55.72 438.05,57.84 438.03,59.96V59.96C438.03,61.39 438.02,62.83 438.02,64.26C438.01,67.78 437.99,71.3 437.97,74.82L437.97,75.29L438.44,75.32C439.14,75.37 439.83,75.42 440.55,75.47V75.47C452.9,76.42 461.54,80.48 469.99,89.65H469.99C480.79,102.31 480.11,117.45 480.04,133.39V133.39L480.06,140.28C480.08,146.49 480.08,152.69 480.06,158.9C480.06,162.78 480.06,166.66 480.06,170.55C480.06,171.16 480.06,171.87 480.06,172.51C480.07,173.82 480.07,175.13 480.07,176.45C480.08,188.74 480.07,201.03 480.05,213.32C480.03,223.85 480.03,234.37 480.05,244.9C480.07,257.15 480.08,269.4 480.07,281.65C480.06,282.96 480.06,284.27 480.06,285.58C480.06,286.58 480.06,286.51 480.06,287.53C480.06,292.05 480.06,296.56 480.07,301.08C480.08,307.16 480.07,313.25 480.05,319.34V319.34C480.05,321.57 480.05,323.8 480.06,326.02C480.11,342.2 479.62,356.29 468.05,368.52C456.35,379.6 443.75,381.01 428.41,381.05H426.92C425.24,381.06 423.57,381.06 421.89,381.06C417.3,381.07 412.71,381.07 408.12,381.07L393.26,381.08C383.56,381.09 373.86,381.1 364.15,381.09C356.27,381.09 348.38,381.09 340.49,381.1C339.37,381.1 338.25,381.1 337.09,381.1C334.81,381.1 332.53,381.1 330.25,381.1C319.56,381.11 308.86,381.11 298.17,381.11L266.09,381.1C246.53,381.1 226.97,381.11 207.41,381.13C187.32,381.15 167.23,381.16 147.14,381.15C135.86,381.15 124.59,381.15 113.31,381.17C103.71,381.18 94.11,381.18 84.51,381.17C79.61,381.16 74.72,381.16 69.82,381.17C65.33,381.18 60.85,381.18 56.36,381.17H53.93C53.12,381.17 52.31,381.17 51.5,381.17C35.8,381.24 23.45,378.8 11.82,367.88C2.69,358.15 0.69,346.81 0.64,333.85V332.59C0.63,331.32 0.63,330.06 0.62,328.76C0.62,327.02 0.61,325.28 0.61,323.54L0.62,318.32C0.62,314.56 0.61,310.8 0.6,307.03C0.58,299.67 0.58,292.31 0.59,284.95C0.59,278.96 0.59,272.98 0.59,266.99C0.59,266.14 0.59,265.28 0.58,264.4C0.58,262.67 0.58,260.93 0.58,259.2C0.57,242.96 0.57,226.71 0.58,210.46C0.59,195.62 0.58,180.77 0.56,165.93C0.53,150.66 0.52,135.4 0.53,120.14C0.53,111.57 0.53,103.01 0.52,94.45C0.5,87.16 0.5,79.88 0.52,72.59C0.53,68.88 0.53,65.16 0.51,61.45C0.5,57.41 0.51,53.38 0.53,49.34V49.33C0.52,48.18 0.51,47.02 0.5,45.83C0.61,33.33 3.87,22.29 12.5,13.16C23.56,2.69 35.32,0.59 50.21,0.62H50.21C51.49,0.61 52.76,0.61 54.08,0.6C57.55,0.59 61.02,0.59 64.5,0.59C67.41,0.59 70.32,0.59 73.23,0.58C80.11,0.57 86.98,0.57 93.86,0.58C100.93,0.58 107.99,0.57 115.06,0.55C121.15,0.53 127.24,0.53 133.33,0.53C135.14,0.53 136.96,0.53 138.77,0.53L144.21,0.52C147.63,0.5 151.04,0.51 154.45,0.52H154.46C156.29,0.52 158.12,0.51 159.95,0.5Z"
+private const val FOLDER_PATH_2 = "M304.09,156.04C304.84,156.63 305.59,157.22 306.36,157.83C323.65,172.16 335.77,194.9 338.62,217.11C340.84,247.36 334.84,274.51 314.81,297.82C314.14,298.57 313.48,299.32 312.79,300.09C312.28,300.68 311.77,301.27 311.25,301.87C298.2,315.98 280.06,324.85 261.55,329.09C260.84,329.26 260.12,329.43 259.39,329.61C237.35,334.5 214.72,330.53 194.84,320.39C193.82,319.88 192.79,319.36 191.74,318.83C169.79,306.84 153.35,286.34 145.74,262.63C145.35,261.26 144.95,259.89 144.57,258.52C144.31,257.67 144.05,256.83 143.79,255.96C141.56,248.06 141.14,240.54 141.18,232.35C141.18,231.7 141.19,231.04 141.19,230.36C141.35,207.33 148.94,186.29 163.9,168.6C164.79,167.49 164.79,167.49 165.69,166.34C180.37,148.57 202.35,137.55 224.81,133.8C225.57,133.67 226.33,133.55 227.11,133.41C255.13,129.59 282.52,138.23 304.09,156.04Z"
+private const val FOLDER_PATH_3 = "M216.11,33.25C243.08,33.19 270.05,33.13 297.01,33.1C309.54,33.09 322.06,33.07 334.58,33.03C345.49,33.01 356.41,32.99 367.32,32.98C373.1,32.98 378.88,32.97 384.66,32.95C390.1,32.93 395.54,32.92 400.98,32.93C402.97,32.92 404.97,32.92 406.96,32.91C409.69,32.89 412.42,32.9 415.15,32.9C415.93,32.9 416.72,32.89 417.53,32.88C423.47,32.93 429.03,33.87 433.69,37.85C434.13,38.43 434.57,39 435.03,39.6C435.48,40.18 435.94,40.76 436.41,41.35C438.8,44.78 438.6,47.77 438.57,51.81C438.56,52.84 438.56,52.84 438.56,53.88C438.56,56.07 438.54,58.26 438.53,60.44C438.53,61.93 438.52,63.41 438.52,64.89C438.51,68.52 438.49,72.16 438.47,75.79C416.45,75.86 394.43,75.91 372.42,75.94C362.19,75.96 351.97,75.98 341.74,76.01C332.83,76.04 323.92,76.06 315,76.07C310.29,76.07 305.57,76.08 300.85,76.1C296.4,76.12 291.96,76.12 287.51,76.12C285.89,76.12 284.26,76.13 282.63,76.14C260.73,76.28 249.34,68.35 234.05,53.29C232.44,51.69 230.83,50.09 229.22,48.48C227.56,46.82 225.9,45.17 224.23,43.52C223.17,42.47 222.11,41.41 221.06,40.36C220.31,39.62 220.31,39.62 219.55,38.87C216.11,35.41 216.11,35.41 216.11,33.25Z"
+private const val FOLDER_PATH_4 = "M233.64,192.91C235.91,194.43 238.1,196.03 240.28,197.67C241.97,198.9 243.66,200.13 245.36,201.35C246.25,202 247.15,202.65 248.07,203.32C254.04,207.57 260.2,211.55 266.34,215.57C280.66,225.03 280.66,225.03 281.85,229.51C281.75,235.12 279.91,238.22 276.05,242.08C273.93,243.66 271.87,245.09 269.64,246.49C268.35,247.33 267.06,248.16 265.77,249C264.75,249.66 264.75,249.66 263.7,250.34C260.65,252.34 257.65,254.4 254.65,256.47C251.56,258.6 248.46,260.72 245.35,262.83C243.32,264.22 241.29,265.64 239.27,267.05C238.1,267.85 236.92,268.65 235.75,269.45C234.75,270.15 233.74,270.84 232.71,271.56C228.7,273.47 226.32,273.42 221.91,273.02C218.47,270.92 216.59,269.01 215.14,265.29C214.88,262.33 214.88,262.33 214.86,258.81C214.85,258.17 214.85,257.53 214.84,256.87C214.82,254.75 214.82,252.63 214.82,250.52C214.81,249.04 214.8,247.57 214.8,246.09C214.79,243 214.78,239.9 214.78,236.81C214.78,232.85 214.76,228.9 214.72,224.95C214.7,221.9 214.7,218.85 214.7,215.8C214.7,214.34 214.69,212.88 214.67,211.43C214.65,209.38 214.66,207.34 214.67,205.3C214.67,204.14 214.67,202.98 214.66,201.78C215.24,197.91 216.59,195.82 219.01,192.77C223.58,189.85 228.98,190.42 233.64,192.91Z"
+
+@Composable
+fun rememberThemedFolderVectorPainter(
+    primaryColor: Color = MaterialTheme.colorScheme.primary
+): VectorPainter {
+    val path1Nodes = remember { addPathNodes(FOLDER_PATH_1) }
+    val path2Nodes = remember { addPathNodes(FOLDER_PATH_2) }
+    val path3Nodes = remember { addPathNodes(FOLDER_PATH_3) }
+    val path4Nodes = remember { addPathNodes(FOLDER_PATH_4) }
+
+    val mainBodyFill = primaryColor
+    // Distinct 3D shadow blend for front pocket flap
+    val frontPocketShadowFill = Color.Black.copy(alpha = 0.18f)
+    // Distinct bright highlight blend for top back tab lip
+    val topTabHighlightFill = Color.White.copy(alpha = 0.35f)
+    // Prominent dark vector outline stroke around folder shape
+    val borderStrokeColor = Color.Black.copy(alpha = 0.35f)
+    val playTriangleFill = Color.White
+
+    val imageVector = remember(primaryColor) {
+        ImageVector.Builder(
+            name = "ThemedFolderVideoVector",
+            defaultWidth = 481.dp,
+            defaultHeight = 382.dp,
+            viewportWidth = 481f,
+            viewportHeight = 382f
+        ).apply {
+            // Path 1: Outer Folder Body with prominent outline border
+            addPath(
+                pathData = path1Nodes,
+                fill = SolidColor(mainBodyFill),
+                stroke = SolidColor(borderStrokeColor),
+                strokeLineWidth = 6f
+            )
+            // Path 3: Top Back Tab Lip (bright highlight overlay)
+            addPath(
+                pathData = path3Nodes,
+                fill = SolidColor(topTabHighlightFill)
+            )
+            // Path 2: Inner Front Pocket Layer (3D shadow overlay)
+            addPath(
+                pathData = path2Nodes,
+                fill = SolidColor(frontPocketShadowFill)
+            )
+            // Path 4: Center Play Triangle
+            addPath(
+                pathData = path4Nodes,
+                fill = SolidColor(playTriangleFill)
+            )
+        }.build()
+    }
+    return rememberVectorPainter(imageVector)
+}
+
+@Composable
+fun ThemedFolderIcon(
+    modifier: Modifier = Modifier,
+    primaryColor: Color = MaterialTheme.colorScheme.primary
+) {
+    val painter = rememberThemedFolderVectorPainter(primaryColor = primaryColor)
+    Image(
+        painter = painter,
+        contentDescription = null,
+        contentScale = ContentScale.Fit,
+        modifier = modifier
+    )
 }
 
 @Composable
@@ -699,29 +1283,31 @@ fun FolderCard(
     totalDurationText: String,
     onClick: () -> Unit
 ) {
+    val displayName = remember(folderName) {
+        if (folderName == "0" || folderName.isEmpty() || folderName == "emulated") "Internal Storage" else folderName
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 8.dp)
             .testTag("folder_card_$folderName"),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.Top
     ) {
-        Image(
-            painter = painterResource(id = R.drawable.ic_folder_video),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.size(100.dp, 70.dp)
+        ThemedFolderIcon(
+            modifier = Modifier
+                .align(Alignment.Top)
+                .size(90.dp, 64.dp)
         )
         Spacer(modifier = Modifier.width(10.dp))
         Column(
             modifier = Modifier
                 .weight(1f)
-                .align(Alignment.CenterVertically),
+                .align(Alignment.Top),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
-                text = folderName,
+                text = displayName,
                 color = MaterialTheme.colorScheme.onSurface,
                 overflow = TextOverflow.Ellipsis,
                 maxLines = 2,
@@ -749,6 +1335,7 @@ fun FolderCard(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontSize = 12.sp,
+                    lineHeight = 16.sp,
                     fontWeight = FontWeight.Medium,
                     lineBreak = LineBreak.Paragraph
                 )
@@ -763,50 +1350,75 @@ fun FolderGridCard(
     videoCount: Int,
     onClick: () -> Unit
 ) {
-    Column(
+    val displayName = remember(folderName) {
+        if (folderName == "0" || folderName.isEmpty() || folderName == "emulated") "Internal Storage" else folderName
+    }
+    Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(8.dp)
-            .clickable { onClick() },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+            .clickable { onClick() }
+            .testTag("folder_grid_card_$folderName"),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Transparent
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Image(
-            painter = painterResource(id = R.drawable.ic_folder_video),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.size(80.dp, 55.dp)
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = folderName,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.titleSmall.copy(
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
-                lineHeight = 16.sp,
-                lineBreak = LineBreak.Paragraph
-            )
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        val videoText = if (videoCount == 1) "1 Video" else "$videoCount Videos"
-        Text(
-            text = videoText,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 11.sp,
-                lineHeight = 14.sp,
-                lineBreak = LineBreak.Paragraph
-            )
-        )
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Folder Icon container utilizing available horizontal space cleanly without background fill
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1.777f)
+                    .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                ThemedFolderIcon(
+                    modifier = Modifier
+                        .fillMaxSize(0.92f)
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = displayName,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        lineHeight = 18.sp,
+                        lineBreak = LineBreak.Paragraph
+                    )
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                val videoText = if (videoCount == 1) "1 Video" else "$videoCount Videos"
+                Text(
+                    text = videoText,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        lineBreak = LineBreak.Paragraph
+                    )
+                )
+            }
+        }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun LocalVideoCard(
     video: VideoModel,
@@ -814,8 +1426,13 @@ fun LocalVideoCard(
     resumeEnabled: Boolean = false,
     progressMs: Long = 0L,
     durationMs: Long = 0L,
+    tileInfo: VideoTileInfo = VideoTileInfo.ESSENTIAL,
+    isMultiSelectMode: Boolean = false,
+    isSelected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
     onPlay: () -> Unit,
-    onAddToPlaylist: () -> Unit
+    onAddToPlaylist: () -> Unit = {},
+    onLongClick: (() -> Unit)? = null
 ) {
     val file = remember(video.urlOrPath) { File(video.urlOrPath) }
     val extension = remember(file) { file.extension.uppercase().ifEmpty { "VID" } }
@@ -826,26 +1443,36 @@ fun LocalVideoCard(
     val cleanTitle = remember(video.title) { video.title.substringBeforeLast('.') }
     val highlightColor = MaterialTheme.colorScheme.primary
 
-    Column(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onPlay() }
-            .testTag("local_video_card_${video.id}")
+            .padding(vertical = 2.dp)
+            .combinedClickable(
+                onClick = { if (isMultiSelectMode) onToggleSelect() else onPlay() },
+                onLongClick = { onLongClick?.invoke() }
+            )
+            .testTag("local_video_card_${video.id}"),
+        shape = RoundedCornerShape(12.dp),
+        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f) else Color.Transparent,
+        border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 8.dp, horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.Top
         ) {
             // Media thumbnail
             Box(
                 modifier = Modifier
+                    .align(Alignment.Top)
                     .size(120.dp, 80.dp)
                     .clip(RoundedCornerShape(8.dp))
             ) {
                 VideoThumbnail(
                     videoPath = video.urlOrPath,
+                    durationMs = durationMs,
+                    progressMs = progressMs,
                     modifier = Modifier.fillMaxSize(),
                     placeholder = {
                         Box(
@@ -864,31 +1491,35 @@ fun LocalVideoCard(
                     }
                 )
 
-                val resolution = rememberVideoResolution(video)
-                if (!resolution.isNullOrEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(8.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .padding(horizontal = 4.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = resolution,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            lineHeight = 7.sp
-                        )
+                // Resolution badge (Advanced mode only)
+                if (tileInfo == VideoTileInfo.ADVANCED) {
+                    val resolution = rememberVideoResolution(video)
+                    if (!resolution.isNullOrEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = resolution,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                lineHeight = 7.sp
+                            )
+                        }
                     }
                 }
 
-                if (resumeEnabled && progressMs > 0L) {
+                // Progress Indicator (Advanced mode only)
+                if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) {
                     val progressRatio = if (durationMs > 0) (progressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                     if (progressRatio > 0f) {
                         LinearProgressIndicator(
-                            progress = progressRatio,
+                            progress = { progressRatio },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(4.dp)
@@ -905,7 +1536,7 @@ fun LocalVideoCard(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .align(Alignment.CenterVertically),
+                    .align(Alignment.Top),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 MiddleEllipsisText(
@@ -935,67 +1566,97 @@ fun LocalVideoCard(
                     maxLines = 2
                 )
 
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Format box (extension)
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.CenterVertically)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
-                        contentAlignment = Alignment.Center
+                if (tileInfo != VideoTileInfo.MINIMAL) {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = extension,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            lineHeight = 7.sp
-                        )
-                    }
+                        // Format box (extension badge, Advanced mode only)
+                        if (tileInfo == VideoTileInfo.ADVANCED) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterVertically)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.primary)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = extension,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    lineHeight = 7.sp
+                                )
+                            }
 
-                    Text(
-                        text = "•",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
-                    Text(
-                        text = formatDuration(video.duration),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
-                    Text(
-                        text = "•",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
-                    Text(
-                        text = formatSize(video.size),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
+                            Text(
+                                text = "•",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                modifier = Modifier.align(Alignment.CenterVertically)
+                            )
+                        }
+
+                        Text(
+                            text = formatDuration(video.duration),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodySmall.copy(lineHeight = 16.sp),
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        )
+                        Text(
+                            text = "•",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        )
+                        Text(
+                            text = formatSize(video.size),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodySmall.copy(lineHeight = 16.sp),
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        )
+
+                        if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) {
+                            Text(
+                                text = "•",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                modifier = Modifier.align(Alignment.CenterVertically)
+                            )
+                            Text(
+                                text = "${formatDuration(progressMs)} / ${formatDuration(durationMs)}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.bodySmall.copy(lineHeight = 16.sp),
+                                modifier = Modifier.align(Alignment.CenterVertically)
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LocalVideoGridCard(
     video: VideoModel,
     resumeEnabled: Boolean = false,
     progressMs: Long = 0L,
     durationMs: Long = 0L,
+    tileInfo: VideoTileInfo = VideoTileInfo.ESSENTIAL,
+    isMultiSelectMode: Boolean = false,
+    isSelected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
     onPlay: () -> Unit,
-    onAddToPlaylist: () -> Unit
+    onAddToPlaylist: () -> Unit = {},
+    onLongClick: (() -> Unit)? = null
 ) {
     val file = remember(video.urlOrPath) { File(video.urlOrPath) }
     val extension = remember(file) { file.extension.uppercase().ifEmpty { "VID" } }
@@ -1006,10 +1667,16 @@ fun LocalVideoGridCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onPlay() }
+            .combinedClickable(
+                onClick = { if (isMultiSelectMode) onToggleSelect() else onPlay() },
+                onLongClick = { onLongClick?.invoke() }
+            )
             .testTag("local_video_grid_card_${video.id}"),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surface
+        ),
+        border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -1022,6 +1689,8 @@ fun LocalVideoGridCard(
             ) {
                 VideoThumbnail(
                     videoPath = video.urlOrPath,
+                    durationMs = durationMs,
+                    progressMs = progressMs,
                     modifier = Modifier.fillMaxSize(),
                     placeholder = {
                         Box(
@@ -1040,49 +1709,33 @@ fun LocalVideoGridCard(
                     }
                 )
                 
-                // Overlay duration on bottom right of the thumbnail
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color.Black.copy(alpha = 0.7f))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = formatDuration(video.duration),
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-
-                // Overlay extension & resolution on top left of the thumbnail
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    // Video type (extension) badge
+                // Overlay duration on bottom right of thumbnail (Essential & Advanced)
+                if (tileInfo != VideoTileInfo.MINIMAL) {
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(MaterialTheme.colorScheme.primary)
+                            .align(Alignment.BottomEnd)
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color.Black.copy(alpha = 0.7f))
                             .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = extension,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            lineHeight = 7.sp
+                            text = formatDuration(video.duration),
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
+                }
 
-                    // Resolution badge
-                    val resolution = rememberVideoResolution(video)
-                    if (!resolution.isNullOrEmpty()) {
+                // Overlay extension & resolution badges on top left (Advanced mode only)
+                if (tileInfo == VideoTileInfo.ADVANCED) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(2.dp))
@@ -1090,21 +1743,40 @@ fun LocalVideoGridCard(
                                 .padding(horizontal = 4.dp, vertical = 2.dp)
                         ) {
                             Text(
-                                text = resolution,
+                                text = extension,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onPrimary,
                                 lineHeight = 7.sp
                             )
                         }
+
+                        val resolution = rememberVideoResolution(video)
+                        if (!resolution.isNullOrEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.primary)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = resolution,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    lineHeight = 7.sp
+                                )
+                            }
+                        }
                     }
                 }
 
-                if (resumeEnabled && progressMs > 0L) {
+                // Progress Indicator (Advanced mode only)
+                if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) {
                     val progressRatio = if (durationMs > 0) (progressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                     if (progressRatio > 0f) {
                         LinearProgressIndicator(
-                            progress = progressRatio,
+                            progress = { progressRatio },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(4.dp)
@@ -1117,7 +1789,12 @@ fun LocalVideoGridCard(
                 }
             }
 
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 val cleanTitle = remember(video.title) { video.title.substringBeforeLast('.') }
                 MiddleEllipsisText(
                     text = cleanTitle,
@@ -1125,13 +1802,14 @@ fun LocalVideoGridCard(
                     style = MaterialTheme.typography.titleSmall.copy(
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp,
+                        lineHeight = 18.sp,
                         color = MaterialTheme.colorScheme.onSurface,
-                        lineHeight = 16.sp,
+                        textAlign = TextAlign.Center
                     ),
                     maxLines = 1
                 )
                 
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 
                 MiddleEllipsisText(
                     text = displayPath,
@@ -1139,21 +1817,32 @@ fun LocalVideoGridCard(
                     style = MaterialTheme.typography.bodySmall.copy(
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                        lineHeight = 14.sp,
+                        lineHeight = 16.sp,
+                        textAlign = TextAlign.Center
                     ),
                     maxLines = 1
                 )
                 
-                Spacer(modifier = Modifier.height(3.dp))
+                if (tileInfo != VideoTileInfo.MINIMAL) {
+                    Spacer(modifier = Modifier.height(2.dp))
 
-                Text(
-                    text = formatSize(video.size),
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        lineHeight = 14.sp,
+                    val detailText = if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) {
+                        "${formatSize(video.size)} • ${formatDuration(progressMs)} / ${formatDuration(durationMs)}"
+                    } else {
+                        formatSize(video.size)
+                    }
+
+                    Text(
+                        text = detailText,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        color = if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            lineHeight = 16.sp,
+                            fontWeight = if (tileInfo == VideoTileInfo.ADVANCED && resumeEnabled && progressMs > 0L) FontWeight.SemiBold else FontWeight.Normal
+                        )
                     )
-                )
+                }
             }
         }
     }
@@ -1250,4 +1939,83 @@ fun formatSize(bytes: Long): String {
     val units = arrayOf("B", "KB", "MB", "GB", "TB")
     val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
     return String.format("%.2f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
+}
+
+private data class FolderItem(
+    val name: String,
+    val path: String,
+    val videoCount: Int,
+    val totalDurationMs: Long,
+    val totalSize: Long,
+    val maxDate: Long,
+    val sampleVideos: List<VideoModel>
+)
+
+private fun sortFolders(folders: List<FolderItem>, sortField: SortField, sortDirection: SortDirection): List<FolderItem> {
+    val sorted = when (sortField) {
+        SortField.NAME -> folders.sortedBy { it.name.lowercase() }
+        SortField.DATE -> folders.sortedBy { it.maxDate }
+        SortField.SIZE -> folders.sortedBy { it.totalSize }
+        SortField.DURATION -> folders.sortedBy { it.totalDurationMs }
+    }
+    return if (sortDirection == SortDirection.DESCENDING) sorted.reversed() else sorted
+}
+
+private fun sortVideos(videos: List<VideoModel>, sortField: SortField, sortDirection: SortDirection): List<VideoModel> {
+    val sorted = when (sortField) {
+        SortField.NAME -> videos.sortedBy { it.title.lowercase() }
+        SortField.DATE -> videos.sortedBy { File(it.urlOrPath).lastModified() }
+        SortField.SIZE -> videos.sortedBy { it.size }
+        SortField.DURATION -> videos.sortedBy { it.duration }
+    }
+    return if (sortDirection == SortDirection.DESCENDING) sorted.reversed() else sorted
+}
+
+private fun resolveDeepestSingleChildPath(startPath: String, localVideos: List<VideoModel>): String {
+    var currPath = startPath
+    while (currPath.isNotEmpty()) {
+        val hasDirectVids = localVideos.any { File(it.urlOrPath).parentFile?.absolutePath == currPath }
+        if (hasDirectVids) break
+        val childSubdirs = localVideos.mapNotNull { video ->
+            val p = File(video.urlOrPath).parentFile ?: return@mapNotNull null
+            var curr: File? = p
+            var child: File? = null
+            while (curr != null) {
+                if (curr.absolutePath == currPath && child != null) return@mapNotNull child.absolutePath
+                child = curr
+                curr = curr.parentFile
+            }
+            null
+        }.distinct()
+        if (childSubdirs.size == 1) {
+            currPath = childSubdirs.first()
+        } else {
+            break
+        }
+    }
+    return currPath
+}
+
+private fun resolveParentBranchingPath(currPath: String, rootTreePath: String, localVideos: List<VideoModel>): String? {
+    var parent = File(currPath).parentFile?.absolutePath ?: return null
+    while (parent.startsWith(rootTreePath) && parent != rootTreePath) {
+        val hasDirectVids = localVideos.any { File(it.urlOrPath).parentFile?.absolutePath == parent }
+        if (hasDirectVids) return parent
+
+        val childSubdirs = localVideos.mapNotNull { video ->
+            val p = File(video.urlOrPath).parentFile ?: return@mapNotNull null
+            var curr: File? = p
+            var child: File? = null
+            while (curr != null) {
+                if (curr.absolutePath == parent && child != null) return@mapNotNull child.absolutePath
+                child = curr
+                curr = curr.parentFile
+            }
+            null
+        }.distinct()
+
+        if (childSubdirs.size > 1) return parent
+        parent = File(parent).parentFile?.absolutePath ?: return rootTreePath
+    }
+    return if (parent.startsWith(rootTreePath)) rootTreePath else null
 }

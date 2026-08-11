@@ -52,206 +52,172 @@ fun StreamScreen(
             .background(MaterialTheme.colorScheme.background)
             .testTag("stream_screen_root")
     ) {
-        Scaffold(
-            snackbarHost = {
-                SnackbarHost(
-                    hostState = snackbarHostState,
-                    snackbar = { snackbarData ->
-                        Card(
-                            modifier = Modifier
-                                .padding(horizontal = 24.dp, vertical = 16.dp)
-                                .fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Info,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = snackbarData.visuals.message,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-                )
-            },
-            topBar = {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 4.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = "Network Stream",
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onBackground,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "Play online URLs & live streams",
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                            )
-                        }
-                    }
-                }
-            },
-            containerColor = MaterialTheme.colorScheme.background
-        ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 20.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            // Sleek explanation text
+            Text(
+                text = "Stream online media content directly by entering the network link. StreamCache supports high-quality HTTP, HTTPS, RTSP, and HLS (M3U8) live streams.",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 20.sp
+            )
+
+            // Input Group
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 24.dp, vertical = 20.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(24.dp)
+                    .fillMaxWidth()
+                    .testTag("form_fields_container"),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Sleek explanation text
-                Text(
-                    text = "Stream online media content directly by entering the network link. StreamCache supports high-quality HTTP, HTTPS, RTSP, and HLS (M3U8) live streams.",
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 20.sp
-                )
-
-                // Input Group
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("form_fields_container"),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    // Title Input
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Stream Title (Optional)",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                        CustomOutlinedTextField(
-                            value = titleInput,
-                            onValueChange = { titleInput = it },
-                            placeholder = "e.g. My Live Stream",
-                            leadingIcon = Icons.Default.Title,
-                            testTag = "stream_title_input"
-                        )
-                    }
-
-                    // URL Input
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Stream Link / URL",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                        CustomOutlinedTextField(
-                            value = urlInput,
-                            onValueChange = { urlInput = it },
-                            placeholder = "https://example.com/stream.m3u8",
-                            leadingIcon = Icons.Default.Link,
-                            testTag = "stream_url_input"
-                        )
-                    }
-
-                    // Subtitle Input
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Subtitle URL (Optional)",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                        CustomOutlinedTextField(
-                            value = subtitleInput,
-                            onValueChange = { subtitleInput = it },
-                            placeholder = "https://example.com/subtitles.srt",
-                            leadingIcon = Icons.Default.Subtitles,
-                            testTag = "stream_subtitle_input"
-                        )
-                    }
+                // Title Input
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Stream Title (Optional)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    CustomOutlinedTextField(
+                        value = titleInput,
+                        onValueChange = { titleInput = it },
+                        placeholder = "e.g. My Live Stream",
+                        leadingIcon = Icons.Default.Title,
+                        testTag = "stream_title_input"
+                    )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Play Button
-                Button(
-                    onClick = {
-                        if (urlInput.isBlank()) {
-                            coroutineScope.launch {
-                                snackbarHostState.showSnackbar("Please enter a stream link")
-                            }
-                        } else {
-                            val finalTitle = titleInput.ifBlank { "Network Stream" }
-                            val video = VideoModel(
-                                id = "custom_stream_${System.currentTimeMillis()}",
-                                title = finalTitle,
-                                urlOrPath = urlInput,
-                                subtitleUrlOrPath = subtitleInput.ifBlank { null },
-                                isStream = true
-                            )
-                            viewModel.playVideo(video)
-                            onNavigateToPlayer()
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp)
-                        .testTag("stream_now_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = ButtonDefaults.buttonElevation(
-                        defaultElevation = 1.dp,
-                        pressedElevation = 2.dp,
-                        focusedElevation = 1.dp,
-                        hoveredElevation = 1.dp
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Stream Now",
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+                // URL Input
+                Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "Stream Now",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary
+                        text = "Stream Link / URL",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    CustomOutlinedTextField(
+                        value = urlInput,
+                        onValueChange = { urlInput = it },
+                        placeholder = "https://example.com/stream.m3u8",
+                        leadingIcon = Icons.Default.Link,
+                        testTag = "stream_url_input"
+                    )
+                }
+
+                // Subtitle Input
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Subtitle URL (Optional)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    CustomOutlinedTextField(
+                        value = subtitleInput,
+                        onValueChange = { subtitleInput = it },
+                        placeholder = "https://example.com/subtitles.srt",
+                        leadingIcon = Icons.Default.Subtitles,
+                        testTag = "stream_subtitle_input"
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Play Button
+            Button(
+                onClick = {
+                    if (urlInput.isBlank()) {
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("Please enter a stream link")
+                        }
+                    } else {
+                        val finalTitle = titleInput.ifBlank { "Network Stream" }
+                        val video = VideoModel(
+                            id = "custom_stream_${System.currentTimeMillis()}",
+                            title = finalTitle,
+                            urlOrPath = urlInput,
+                            subtitleUrlOrPath = subtitleInput.ifBlank { null },
+                            isStream = true
+                        )
+                        viewModel.playVideo(video)
+                        onNavigateToPlayer()
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .testTag("stream_now_button"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                ),
+                shape = RoundedCornerShape(16.dp),
+                elevation = ButtonDefaults.buttonElevation(
+                    defaultElevation = 1.dp,
+                    pressedElevation = 2.dp,
+                    focusedElevation = 1.dp,
+                    hoveredElevation = 1.dp
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "Stream Now",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Stream Now",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp),
+            snackbar = { snackbarData ->
+                Card(
+                    modifier = Modifier
+                        .padding(horizontal = 24.dp, vertical = 16.dp)
+                        .fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = snackbarData.visuals.message,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        )
     }
 }
 

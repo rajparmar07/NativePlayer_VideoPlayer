@@ -30,11 +30,16 @@ import java.io.File
 @Composable
 fun PlaylistScreen(
     viewModel: VideoPlayerViewModel,
-    onNavigateToPlayer: () -> Unit
+    onNavigateToPlayer: () -> Unit,
+    onCreatePlaylistRequested: (() -> Unit) -> Unit = {}
 ) {
     val playlists by viewModel.playlists.collectAsState()
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        onCreatePlaylistRequested { showCreateDialog = true }
+    }
 
     Box(
         modifier = Modifier
@@ -48,48 +53,6 @@ fun PlaylistScreen(
                 modifier = Modifier
                     .fillMaxSize()
             ) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth().zIndex(1f),
-                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 4.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Playlists",
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-                            Text(
-                                text = "Create and organize video collections",
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(16.dp))
-
-                        FilledIconButton(
-                            onClick = { showCreateDialog = true },
-                            modifier = Modifier.testTag("new_playlist_button"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PlaylistAdd,
-                                contentDescription = "New Playlist"
-                            )
-                        }
-                    }
-                }
 
                 if (playlists.isEmpty()) {
                     Box(

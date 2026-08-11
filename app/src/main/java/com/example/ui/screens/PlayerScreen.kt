@@ -1,3 +1,8 @@
+@file:kotlin.OptIn(
+    androidx.media3.common.util.UnstableApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class
+)
+
 package com.example.ui.screens
 
 import android.app.Activity
@@ -16,7 +21,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import kotlin.OptIn
 import androidx.compose.animation.*
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -136,7 +140,7 @@ private fun getFileName(context: Context, uri: Uri): String {
     return result ?: "subtitle.srt"
 }
 
-@OptIn(
+@kotlin.OptIn(
     androidx.media3.common.util.UnstableApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class
 )
@@ -152,6 +156,9 @@ fun PlayerScreen(
     val playbackQueue by viewModel.playbackQueue.collectAsState()
     val isInPipMode by viewModel.isInPipMode.collectAsState()
     val subtitleStyle by viewModel.subtitleStyle.collectAsState()
+    val audioFocusEnabled by viewModel.audioFocusEnabled.collectAsState()
+    val pauseOnHeadphonesDisconnectEnabled by viewModel.pauseOnHeadphonesDisconnectEnabled.collectAsState()
+    val buttonSeekSeconds by viewModel.buttonSeekSeconds.collectAsState()
     var scale by remember { mutableFloatStateOf(1f) }
 
     // Fast Seek & 4K HEVC Override logic
@@ -165,9 +172,16 @@ fun PlayerScreen(
     var showNoSubtitlesPrompt by remember { mutableStateOf(false) }
     var selectedSubtitleGroupIndex by remember { mutableStateOf<Int?>(null) }
     var selectedSubtitleTrackIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedSubtitleLanguage by remember { mutableStateOf<String?>(null) }
     var selectedAudioGroupIndex by remember { mutableStateOf<Int?>(null) }
     var selectedAudioTrackIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedAudioLanguage by remember { mutableStateOf<String?>(null) }
     var isSubtitleDisabled by remember { mutableStateOf(true) }
+    var activeSubtitles by remember { mutableStateOf(false) }
+    var isSeekable by remember { mutableStateOf(true) }
+    var decoderResetSeekingDisabled by remember { mutableStateOf(false) }
+    var lastSeekTargetMs by remember { mutableLongStateOf(-1L) }
+    var lastSeekTimeMs by remember { mutableLongStateOf(0L) }
 
     var playbackErrorMsg by remember { mutableStateOf<String?>(null) }
     var snackbarMessage by remember { mutableStateOf<String?>(null) }
@@ -178,6 +192,7 @@ fun PlayerScreen(
             snackbarMessage = null
         }
     }
+
     var subtitleTracks by remember { mutableStateOf<List<SubtitleTrackInfo>>(emptyList()) }
     var lastVideoUrl by remember { mutableStateOf("") }
 
@@ -287,16 +302,37 @@ fun PlayerScreen(
         }
     }
 
-    // Reset external subtitle on video change
+    // Reset or restore track selections on video change
     LaunchedEffect(video) {
         if (lastVideoUrl != video.urlOrPath) {
             lastVideoUrl = video.urlOrPath
             externalSubtitleUri = null
-            selectedSubtitleGroupIndex = null
-            selectedSubtitleTrackIndex = null
-            selectedAudioGroupIndex = null
-            selectedAudioTrackIndex = null
-            isSubtitleDisabled = true
+            isSeekable = true
+            decoderResetSeekingDisabled = false
+            lastSeekTargetMs = -1L
+            lastSeekTimeMs = 0L
+
+            val resumeEnabled = viewModel.resumeFromLastLeftEnabled.value
+            val savedState = if (resumeEnabled) viewModel.getVideoPlaybackState(video.urlOrPath) else null
+            if (savedState != null) {
+                selectedAudioGroupIndex = savedState.audioGroupIndex
+                selectedAudioTrackIndex = savedState.audioTrackIndex
+                selectedAudioLanguage = savedState.audioLanguage
+                selectedSubtitleGroupIndex = savedState.subtitleGroupIndex
+                selectedSubtitleTrackIndex = savedState.subtitleTrackIndex
+                selectedSubtitleLanguage = savedState.subtitleLanguage
+                isSubtitleDisabled = savedState.isSubtitleDisabled
+                activeSubtitles = !savedState.isSubtitleDisabled
+            } else {
+                selectedSubtitleGroupIndex = null
+                selectedSubtitleTrackIndex = null
+                selectedSubtitleLanguage = null
+                selectedAudioGroupIndex = null
+                selectedAudioTrackIndex = null
+                selectedAudioLanguage = null
+                isSubtitleDisabled = true
+                activeSubtitles = false
+            }
         }
     }
 
@@ -399,7 +435,6 @@ fun PlayerScreen(
     var aspectNotificationText by remember { mutableStateOf<String?>(null) }
     var lastAspectNotificationText by remember { mutableStateOf("") }
     var isMuted by remember { mutableStateOf(false) }
-    var activeSubtitles by remember { mutableStateOf(false) }
     var codecInfo by remember { mutableStateOf("Hardware (Auto)") }
     var videoResolution by remember { mutableStateOf("Detecting...") }
     val infiniteTransition = rememberInfiniteTransition(label = "wave_phase")
@@ -479,6 +514,10 @@ fun PlayerScreen(
     var dragStartPos by remember { mutableLongStateOf(0L) }
     // lastSeekSteps: tracks the last committed step count to fire seeks only on step changes
     var lastSeekSteps by remember { mutableLongStateOf(0L) }
+    // isPendingPostSwipe: true after swipe drag ends until final seek and buffering are complete
+    var isPendingPostSwipe by remember { mutableStateOf(false) }
+    // wasPlayingBeforeSwipe: remembers if video was playing before user initiated swipe seek gesture
+    var wasPlayingBeforeSwipe by remember { mutableStateOf(false) }
     // ─────────────────────────────────────────────────────────────────────────
 
     val resetControlsTimeout = {
@@ -515,11 +554,34 @@ fun PlayerScreen(
     LaunchedEffect(isPlaying, exoPlayer) {
         while (true) {
             if (!isGestureSeeking && !isSliderDragging) {
-                currentPos = exoPlayer.currentPosition
+                val current = exoPlayer.currentPosition
+                currentPos = current
                 duration = exoPlayer.duration.coerceAtLeast(0L)
                 bufferPos = exoPlayer.bufferedPosition
                 isPlaying = exoPlayer.isPlaying
                 viewModel.setVideoPlaying(isPlaying)
+
+                val nativeSeekable = exoPlayer.isCurrentMediaItemSeekable
+                val now = System.currentTimeMillis()
+                val seekResetDetected = isSeekable &&
+                        lastSeekTargetMs > 5000L &&
+                        (now - lastSeekTimeMs) < 2500L &&
+                        current < 2000L &&
+                        (lastSeekTargetMs - current) > 4000L
+
+                if (seekResetDetected) {
+                    if (!decoderResetSeekingDisabled) {
+                        decoderResetSeekingDisabled = true
+                        isSeekable = false
+                        android.widget.Toast.makeText(
+                            context,
+                            "Seeking disabled: video decoder reset detected",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                } else if (!decoderResetSeekingDisabled) {
+                    isSeekable = nativeSeekable
+                }
             }
             delay(250)
         }
@@ -533,28 +595,49 @@ fun PlayerScreen(
         )
     }
 
-    // Periodically save progress to preferences (every 5 seconds)
-    LaunchedEffect(video, isPlaying, exoPlayer) {
+    // Apply audio focus & noisy disconnect handling dynamically
+    LaunchedEffect(audioFocusEnabled, pauseOnHeadphonesDisconnectEnabled, exoPlayer) {
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+        exoPlayer.setAudioAttributes(audioAttributes, audioFocusEnabled)
+        exoPlayer.setHandleAudioBecomingNoisy(pauseOnHeadphonesDisconnectEnabled)
+    }
+
+    val saveCurrentProgress = {
+        val currentPosition = exoPlayer.currentPosition
+        val totalDuration = exoPlayer.duration
+        if (totalDuration > 0) {
+            viewModel.saveVideoProgress(
+                urlOrPath = video.urlOrPath,
+                progressMs = currentPosition,
+                durationMs = totalDuration,
+                audioGroupIndex = selectedAudioGroupIndex,
+                audioTrackIndex = selectedAudioTrackIndex,
+                audioLanguage = selectedAudioLanguage,
+                subtitleGroupIndex = selectedSubtitleGroupIndex,
+                subtitleTrackIndex = selectedSubtitleTrackIndex,
+                subtitleLanguage = selectedSubtitleLanguage,
+                isSubtitleDisabled = isSubtitleDisabled
+            )
+        }
+    }
+
+    // Periodically save progress & track preferences to preferences (every 5 seconds)
+    LaunchedEffect(video, isPlaying, exoPlayer, selectedAudioGroupIndex, selectedAudioTrackIndex, selectedSubtitleGroupIndex, selectedSubtitleTrackIndex, isSubtitleDisabled) {
         if (isPlaying) {
             while (true) {
                 delay(5000)
-                val currentPosition = exoPlayer.currentPosition
-                val totalDuration = exoPlayer.duration
-                if (totalDuration > 0) {
-                    viewModel.saveVideoProgress(video.urlOrPath, currentPosition, totalDuration)
-                }
+                saveCurrentProgress()
             }
         }
     }
 
-    // Save final progress on exit or video swap
+    // Save final progress & track preferences on exit or video swap
     DisposableEffect(video, exoPlayer) {
         onDispose {
-            val currentPosition = exoPlayer.currentPosition
-            val totalDuration = exoPlayer.duration
-            if (totalDuration > 0) {
-                viewModel.saveVideoProgress(video.urlOrPath, currentPosition, totalDuration)
-            }
+            saveCurrentProgress()
         }
     }
 
@@ -579,6 +662,26 @@ fun PlayerScreen(
             delay(300L)
             gestureSeekOffset = 0L
             isGestureSeeking = false
+        }
+    }
+
+    // Auto-dismiss post-swipe pending interaction block when ExoPlayer completes buffering or via timeout
+    LaunchedEffect(isPendingPostSwipe) {
+        if (isPendingPostSwipe) {
+            if (exoPlayer.playbackState == Player.STATE_READY || exoPlayer.playbackState == Player.STATE_ENDED || exoPlayer.playbackState == Player.STATE_IDLE) {
+                delay(150L)
+                isPendingPostSwipe = false
+            } else {
+                val startTime = System.currentTimeMillis()
+                while (isPendingPostSwipe && exoPlayer.playbackState == Player.STATE_BUFFERING && (System.currentTimeMillis() - startTime < 2500L)) {
+                    delay(50L)
+                }
+                isPendingPostSwipe = false
+            }
+            if (wasPlayingBeforeSwipe) {
+                exoPlayer.play()
+                wasPlayingBeforeSwipe = false
+            }
         }
     }
 
@@ -731,6 +834,9 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(state: Int) {
                 duration = exoPlayer.duration.coerceAtLeast(0L)
                 isLoading = state == Player.STATE_BUFFERING
+                if (isPendingPostSwipe && state != Player.STATE_BUFFERING) {
+                    isPendingPostSwipe = false
+                }
                 if (state == Player.STATE_ENDED) {
                     viewModel.playNext()
                 }
@@ -823,39 +929,75 @@ fun PlayerScreen(
                         parametersBuilder = parametersBuilder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                         updated = true
                     }
-                } else if (selectedSubtitleGroupIndex != null && selectedSubtitleTrackIndex != null) {
-                    val groupIdx = selectedSubtitleGroupIndex!!
-                    val trackIdx = selectedSubtitleTrackIndex!!
-                    if (groupIdx < tracks.groups.size) {
-                        val group = tracks.groups[groupIdx]
-                        if (group.type == C.TRACK_TYPE_TEXT && trackIdx < group.length) {
+                } else {
+                    var targetGroupIdx = selectedSubtitleGroupIndex
+                    var targetTrackIdx = selectedSubtitleTrackIndex
+
+                    if ((targetGroupIdx == null || targetGroupIdx >= tracks.groups.size) && selectedSubtitleLanguage != null) {
+                        for (gIdx in 0 until tracks.groups.size) {
+                            val group = tracks.groups[gIdx]
+                            if (group.type == C.TRACK_TYPE_TEXT) {
+                                for (tIdx in 0 until group.length) {
+                                    val format = group.getTrackFormat(tIdx)
+                                    if (format.language == selectedSubtitleLanguage) {
+                                        targetGroupIdx = gIdx
+                                        targetTrackIdx = tIdx
+                                        selectedSubtitleGroupIndex = gIdx
+                                        selectedSubtitleTrackIndex = tIdx
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (targetGroupIdx != null && targetTrackIdx != null && targetGroupIdx < tracks.groups.size) {
+                        val group = tracks.groups[targetGroupIdx]
+                        if (group.type == C.TRACK_TYPE_TEXT && targetTrackIdx < group.length) {
                             val trackGroup = group.mediaTrackGroup
                             val hasOverride = exoPlayer.trackSelectionParameters.overrides.containsKey(trackGroup)
                             if (!hasOverride || exoPlayer.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) {
                                 parametersBuilder = parametersBuilder
                                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                    .addOverride(TrackSelectionOverride(trackGroup, trackIdx))
+                                    .addOverride(TrackSelectionOverride(trackGroup, targetTrackIdx))
                                 updated = true
                             }
                         }
                     }
                 }
 
-                if (selectedAudioGroupIndex != null && selectedAudioTrackIndex != null) {
-                    val groupIdx = selectedAudioGroupIndex!!
-                    val trackIdx = selectedAudioTrackIndex!!
-                    if (groupIdx < tracks.groups.size) {
-                        val group = tracks.groups[groupIdx]
-                        if (group.type == C.TRACK_TYPE_AUDIO && trackIdx < group.length) {
-                            val trackGroup = group.mediaTrackGroup
-                            val hasOverride = exoPlayer.trackSelectionParameters.overrides.containsKey(trackGroup)
-                            if (!hasOverride) {
-                                parametersBuilder = parametersBuilder
-                                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                                    .addOverride(TrackSelectionOverride(trackGroup, trackIdx))
-                                updated = true
+                var targetAudioGroupIdx = selectedAudioGroupIndex
+                var targetAudioTrackIdx = selectedAudioTrackIndex
+
+                if ((targetAudioGroupIdx == null || targetAudioGroupIdx >= tracks.groups.size) && selectedAudioLanguage != null) {
+                    for (gIdx in 0 until tracks.groups.size) {
+                        val group = tracks.groups[gIdx]
+                        if (group.type == C.TRACK_TYPE_AUDIO) {
+                            for (tIdx in 0 until group.length) {
+                                val format = group.getTrackFormat(tIdx)
+                                if (format.language == selectedAudioLanguage) {
+                                    targetAudioGroupIdx = gIdx
+                                    targetAudioTrackIdx = tIdx
+                                    selectedAudioGroupIndex = gIdx
+                                    selectedAudioTrackIndex = tIdx
+                                    break
+                                }
                             }
+                        }
+                    }
+                }
+
+                if (targetAudioGroupIdx != null && targetAudioTrackIdx != null && targetAudioGroupIdx < tracks.groups.size) {
+                    val group = tracks.groups[targetAudioGroupIdx]
+                    if (group.type == C.TRACK_TYPE_AUDIO && targetAudioTrackIdx < group.length) {
+                        val trackGroup = group.mediaTrackGroup
+                        val hasOverride = exoPlayer.trackSelectionParameters.overrides.containsKey(trackGroup)
+                        if (!hasOverride) {
+                            parametersBuilder = parametersBuilder
+                                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                                .addOverride(TrackSelectionOverride(trackGroup, targetAudioTrackIdx))
+                            updated = true
                         }
                     }
                 }
@@ -943,12 +1085,12 @@ fun PlayerScreen(
                 }
             }
             // ── Gesture detection (works in both portrait & landscape) ──────────
-            // Key on isLocked so the lambda is re-registered whenever lock changes.
-            .pointerInput(isLocked, isInPipMode, exoPlayer) {
-                if (isInPipMode) return@pointerInput
+            // Re-registered when gesture settings, seeking readiness, or lock states change.
+            .pointerInput(isLocked, isInPipMode, isPendingPostSwipe, seekGestureEnabled, volumeGestureEnabled, brightnessGestureEnabled, isSeekable, seekSwipePixels, seekStepMs, volumeSwipePixels, brightnessSensitivitySetting, exoPlayer) {
+                if (isInPipMode || isPendingPostSwipe) return@pointerInput
                 detectDragGestures(
                     onDragStart = { offset ->
-                        if (isLocked) return@detectDragGestures
+                        if (isLocked || isPendingPostSwipe) return@detectDragGestures
                         // Reset accumulators and classify zone from drag origin
                         dragAccumX = 0f
                         dragAccumY = 0f
@@ -961,7 +1103,7 @@ fun PlayerScreen(
                         lastSeekSteps = 0L
                     },
                     onDrag = { change, dragAmount ->
-                        if (isLocked) return@detectDragGestures
+                        if (isLocked || isPendingPostSwipe) return@detectDragGestures
                         change.consume()
                         dragAccumX += dragAmount.x
                         dragAccumY += dragAmount.y
@@ -969,17 +1111,21 @@ fun PlayerScreen(
                         // Lock the gesture type on the first significant movement
                         if (activeGestureType == null) {
                             when {
-                                // Horizontal dominant → seek
-                                abs(dragAccumX) > abs(dragAccumY) * 1.5f && seekGestureEnabled -> {
+                                // Horizontal dominant (>10px threshold) → seek
+                                abs(dragAccumX) > 10f && abs(dragAccumX) > abs(dragAccumY) * 1.2f && seekGestureEnabled && isSeekable -> {
                                     activeGestureType = GestureType.SEEK
                                     isGestureSeeking = true
+                                    wasPlayingBeforeSwipe = exoPlayer.isPlaying
+                                    if (wasPlayingBeforeSwipe) {
+                                        exoPlayer.pause()
+                                    }
                                     // CLOSEST_SYNC snaps to the nearest keyframe — far faster
                                     // than exact-frame seeks, which is what makes scrubbing smooth
                                     exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                                     showGestureHud = true
                                 }
                                 // Vertical dominant (>10px threshold) → brightness or volume
-                                abs(dragAccumY) > 10f -> {
+                                abs(dragAccumY) > 10f && abs(dragAccumY) > abs(dragAccumX) * 1.2f -> {
                                     if (gestureStartZoneLeft && brightnessGestureEnabled) {
                                         activeGestureType = GestureType.BRIGHTNESS
                                         showGestureHud = true
@@ -996,14 +1142,14 @@ fun PlayerScreen(
                                 // Steps accumulated relative to drag start anchor
                                 val steps = (dragAccumX / seekSwipePixels).toLong()
                                 gestureSeekOffset = steps * seekStepMs
-                                // Live seek: fire exoPlayer.seekTo on every new step crossing
+                                // Live seek: fire exoPlayer.seekTo on every tiny step chunk crossing
                                 val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
                                 currentPos = target
                                 if (steps != lastSeekSteps) {
                                     lastSeekSteps = steps
-                                    if (!activeFastSeek) {
-                                        exoPlayer.seekTo(target)
-                                    }
+                                    lastSeekTargetMs = target
+                                    lastSeekTimeMs = System.currentTimeMillis()
+                                    exoPlayer.seekTo(target)
                                 }
                             }
                             GestureType.BRIGHTNESS -> {
@@ -1036,16 +1182,19 @@ fun PlayerScreen(
                         if (isGestureSeeking) {
                             val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
                             android.util.Log.d("PlayerScreen", "Gesture drag end: target=$target, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
-                            if (activeFastSeek) {
-                                exoPlayer.seekTo(target)
-                            }
-                            // Sync currentPos now; gestureSeekOffset + isGestureSeeking are
-                            // reset after the HUD fadeOut completes (see LaunchedEffect above)
+                            lastSeekTargetMs = target
+                            lastSeekTimeMs = System.currentTimeMillis()
+                            exoPlayer.seekTo(target)
                             currentPos = target
                             exoPlayer.setSeekParameters(
                                 if (activeFastSeek) SeekParameters.CLOSEST_SYNC
                                 else SeekParameters.DEFAULT
                             )
+                            isPendingPostSwipe = true
+                            if (wasPlayingBeforeSwipe) {
+                                exoPlayer.play()
+                                wasPlayingBeforeSwipe = false
+                            }
                         }
                         // Brightness: intentionally NOT reset here — the gesture-set level
                         // stays for the full player session (matching VLC / MX Player behavior).
@@ -1056,14 +1205,19 @@ fun PlayerScreen(
                         if (isGestureSeeking) {
                             val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
                             android.util.Log.d("PlayerScreen", "Gesture drag cancel: target=$target, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
-                            if (activeFastSeek) {
-                                exoPlayer.seekTo(target)
-                            }
+                            lastSeekTargetMs = target
+                            lastSeekTimeMs = System.currentTimeMillis()
+                            exoPlayer.seekTo(target)
                             currentPos = target
                             exoPlayer.setSeekParameters(
                                 if (activeFastSeek) SeekParameters.CLOSEST_SYNC
                                 else SeekParameters.DEFAULT
                             )
+                            isPendingPostSwipe = true
+                            if (wasPlayingBeforeSwipe) {
+                                exoPlayer.play()
+                                wasPlayingBeforeSwipe = false
+                            }
                         }
                         gestureHudHideTrigger++
                     }
@@ -1383,49 +1537,80 @@ fun PlayerScreen(
                 ) {
                     Row(
                         modifier = Modifier
-                            .widthIn(max = 360.dp)
+                            .widthIn(max = 320.dp)
                             .fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val sideControlBg = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f)
+                        val sideBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        val sideIconTint = MaterialTheme.colorScheme.onSurface
+
+                        // 1. Prev Video Button
+                        val isPrevEnabled = currentQueueIndex > 0
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
                                 viewModel.playPrevious()
                             },
-                            enabled = currentQueueIndex > 0,
+                            enabled = isPrevEnabled,
                             modifier = Modifier
-                                .size(56.dp)
+                                .size(44.dp)
                                 .clip(CircleShape)
-                                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f))
+                                .background(if (isPrevEnabled) sideControlBg else sideControlBg.copy(alpha = 0.3f))
+                                .border(1.dp, if (isPrevEnabled) sideBorderColor else sideBorderColor.copy(alpha = 0.15f), CircleShape)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.SkipPrevious,
                                 contentDescription = "Prev Video",
-                                tint = if (currentQueueIndex > 0) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.DarkGray,
-                                modifier = Modifier.size(32.dp)
+                                tint = if (isPrevEnabled) sideIconTint else sideIconTint.copy(alpha = 0.3f),
+                                modifier = Modifier.size(22.dp)
                             )
                         }
 
+                        // 2. Rewind Button (Dynamic buttonSeekSeconds)
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
                                 val current = exoPlayer.currentPosition
-                                exoPlayer.seekTo((current - 10000).coerceAtLeast(0))
+                                val seekStepMs = buttonSeekSeconds * 1000L
+                                val target = (current - seekStepMs).coerceAtLeast(0)
+                                lastSeekTargetMs = target
+                                lastSeekTimeMs = System.currentTimeMillis()
+                                exoPlayer.seekTo(target)
                             },
+                            enabled = isSeekable,
                             modifier = Modifier
-                                .size(56.dp)
+                                .size(44.dp)
                                 .clip(CircleShape)
-                                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f))
+                                .background(if (isSeekable) sideControlBg else sideControlBg.copy(alpha = 0.3f))
+                                .border(1.dp, if (isSeekable) sideBorderColor else sideBorderColor.copy(alpha = 0.15f), CircleShape)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Replay10,
-                                contentDescription = "Rewind 10s",
-                                tint = androidx.compose.ui.graphics.Color.White,
-                                modifier = Modifier.size(32.dp)
-                            )
+                            val rewindIcon = when (buttonSeekSeconds) {
+                                5 -> Icons.Default.Replay5
+                                30 -> Icons.Default.Replay30
+                                else -> Icons.Default.Replay10
+                            }
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = rewindIcon,
+                                    contentDescription = "Rewind ${buttonSeekSeconds}s",
+                                    tint = if (isSeekable) sideIconTint else sideIconTint.copy(alpha = 0.3f),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                if (buttonSeekSeconds != 5 && buttonSeekSeconds != 10 && buttonSeekSeconds != 30) {
+                                    Text(
+                                        text = "$buttonSeekSeconds",
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSeekable) sideIconTint else sideIconTint.copy(alpha = 0.3f),
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
                         }
 
+                        // 3. Main Play / Pause Button (Compact 64dp with Icon Morph Animation)
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
@@ -1437,55 +1622,95 @@ fun PlayerScreen(
                                 isPlaying = exoPlayer.isPlaying
                             },
                             modifier = Modifier
-                                .size(72.dp)
+                                .size(64.dp)
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary)
+                                .border(1.5.dp, MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f), CircleShape)
                                 .testTag("play_pause_video_button")
                         ) {
-                            Icon(
-                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDescription = if (isPlaying) "Pause" else "Play",
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(40.dp)
-                            )
+                            AnimatedContent(
+                                targetState = isPlaying,
+                                transitionSpec = {
+                                    (fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
+                                     scaleIn(initialScale = 0.4f, animationSpec = tween(220, easing = FastOutSlowInEasing)))
+                                        .togetherWith(
+                                            fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)) +
+                                            scaleOut(targetScale = 0.4f, animationSpec = tween(180, easing = FastOutSlowInEasing))
+                                        )
+                                },
+                                label = "play_pause_icon_morph"
+                            ) { playing ->
+                                Icon(
+                                    imageVector = if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (playing) "Pause" else "Play",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(34.dp)
+                                )
+                            }
                         }
 
+                        // 4. Fast Forward Button (Dynamic buttonSeekSeconds)
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
                                 val current = exoPlayer.currentPosition
                                 val total = exoPlayer.duration
-                                exoPlayer.seekTo((current + 10000).coerceAtMost(total))
+                                val seekStepMs = buttonSeekSeconds * 1000L
+                                val target = (current + seekStepMs).coerceAtMost(total)
+                                lastSeekTargetMs = target
+                                lastSeekTimeMs = System.currentTimeMillis()
+                                exoPlayer.seekTo(target)
                             },
+                            enabled = isSeekable,
                             modifier = Modifier
-                                .size(56.dp)
+                                .size(44.dp)
                                 .clip(CircleShape)
-                                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f))
+                                .background(if (isSeekable) sideControlBg else sideControlBg.copy(alpha = 0.3f))
+                                .border(1.dp, if (isSeekable) sideBorderColor else sideBorderColor.copy(alpha = 0.15f), CircleShape)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Forward10,
-                                contentDescription = "Fast Forward 10s",
-                                tint = androidx.compose.ui.graphics.Color.White,
-                                modifier = Modifier.size(32.dp)
-                            )
+                            val forwardIcon = when (buttonSeekSeconds) {
+                                5 -> Icons.Default.Forward5
+                                30 -> Icons.Default.Forward30
+                                else -> Icons.Default.Forward10
+                            }
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = forwardIcon,
+                                    contentDescription = "Fast Forward ${buttonSeekSeconds}s",
+                                    tint = if (isSeekable) sideIconTint else sideIconTint.copy(alpha = 0.3f),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                if (buttonSeekSeconds != 5 && buttonSeekSeconds != 10 && buttonSeekSeconds != 30) {
+                                    Text(
+                                        text = "$buttonSeekSeconds",
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSeekable) sideIconTint else sideIconTint.copy(alpha = 0.3f),
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
                         }
 
+                        // 5. Next Video Button
+                        val isNextEnabled = currentQueueIndex < playbackQueue.size - 1
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
                                 viewModel.playNext()
                             },
-                            enabled = currentQueueIndex < playbackQueue.size - 1,
+                            enabled = isNextEnabled,
                             modifier = Modifier
-                                .size(56.dp)
+                                .size(44.dp)
                                 .clip(CircleShape)
-                                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f))
+                                .background(if (isNextEnabled) sideControlBg else sideControlBg.copy(alpha = 0.3f))
+                                .border(1.dp, if (isNextEnabled) sideBorderColor else sideBorderColor.copy(alpha = 0.15f), CircleShape)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.SkipNext,
                                 contentDescription = "Next Video",
-                                tint = if (currentQueueIndex < playbackQueue.size - 1) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.DarkGray,
-                                modifier = Modifier.size(32.dp)
+                                tint = if (isNextEnabled) sideIconTint else sideIconTint.copy(alpha = 0.3f),
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
@@ -1509,12 +1734,15 @@ fun PlayerScreen(
                         val primaryColor = MaterialTheme.colorScheme.primary
                         Slider(
                             value = sliderPos,
+                            enabled = isSeekable,
                             onValueChange = {
                                 resetControlsTimeout()
                                 isSliderDragging = true
                                 val target = (it * duration).toLong()
                                 currentPos = target
                                 if (!activeFastSeek) {
+                                    lastSeekTargetMs = target
+                                    lastSeekTimeMs = System.currentTimeMillis()
                                     exoPlayer.seekTo(target)
                                 }
                             },
@@ -1522,6 +1750,8 @@ fun PlayerScreen(
                                 isSliderDragging = false
                                 android.util.Log.d("PlayerScreen", "Slider change finished: currentPos=$currentPos, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
                                 if (activeFastSeek) {
+                                    lastSeekTargetMs = currentPos
+                                    lastSeekTimeMs = System.currentTimeMillis()
                                     exoPlayer.seekTo(currentPos)
                                 }
                             },
@@ -1869,11 +2099,13 @@ fun PlayerScreen(
                                         isSubtitleDisabled = true
                                         selectedSubtitleGroupIndex = null
                                         selectedSubtitleTrackIndex = null
+                                        selectedSubtitleLanguage = null
                                         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                             .buildUpon()
                                             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                                             .build()
                                         showSubtitleDialog = false
+                                        saveCurrentProgress()
                                     }
                                 )
                                 .padding(horizontal = 4.dp, vertical = 6.dp),
@@ -1926,6 +2158,7 @@ fun PlayerScreen(
                                             isSubtitleDisabled = false
                                             selectedSubtitleGroupIndex = trackInfo.groupIndex
                                             selectedSubtitleTrackIndex = trackInfo.trackIndex
+                                            selectedSubtitleLanguage = trackInfo.format.language
                                             val trackGroup = exoPlayer.currentTracks.groups[trackInfo.groupIndex].mediaTrackGroup
                                             exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                                 .buildUpon()
@@ -1934,6 +2167,7 @@ fun PlayerScreen(
                                                 .addOverride(TrackSelectionOverride(trackGroup, trackInfo.trackIndex))
                                                 .build()
                                             showSubtitleDialog = false
+                                            saveCurrentProgress()
                                         }
                                     )
                                     .padding(horizontal = 4.dp, vertical = 6.dp),
@@ -2210,6 +2444,7 @@ fun PlayerScreen(
                                             onClick = {
                                                 selectedAudioGroupIndex = trackInfo.groupIndex
                                                 selectedAudioTrackIndex = trackInfo.trackIndex
+                                                selectedAudioLanguage = trackInfo.format.language
                                                 val trackGroup = exoPlayer.currentTracks.groups[trackInfo.groupIndex].mediaTrackGroup
                                                 exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
                                                     .buildUpon()
@@ -2217,6 +2452,7 @@ fun PlayerScreen(
                                                     .addOverride(TrackSelectionOverride(trackGroup, trackInfo.trackIndex))
                                                     .build()
                                                 showAudioTrackDialog = false
+                                                saveCurrentProgress()
                                             }
                                         )
                                         .padding(horizontal = 4.dp, vertical = 6.dp),
@@ -2431,18 +2667,23 @@ fun PlayerScreen(
             }
         }
 
-        if (isLoading) {
+        if (isLoading || isPendingPostSwipe) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.5f))
-                    .clickable(enabled = false) {},
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = if (isLoading) 0.5f else 0.1f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {},
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(
-                    color = MaterialTheme.colorScheme.primary,
-                    strokeWidth = 4.dp
-                )
+                if (isLoading || exoPlayer.playbackState == Player.STATE_BUFFERING) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 4.dp
+                    )
+                }
             }
         }
 
@@ -2562,71 +2803,20 @@ private fun GestureHudOverlay(
     seekOffsetMs: Long,
     seekBasePos: Long   // stable drag-start position — used for "from" timestamp
 ) {
-    // Shared card style
-    val cardBg = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.72f)
-    val barWidth = 44.dp
-    val barHeight = 140.dp
+    val barWidth = 24.dp
+    val barHeight = 130.dp
 
-    // ── Brightness HUD (left-center) ──────────────────────────────────────────
+    // Theme color palette tokens
+    val cardColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+    val borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val tertiaryColor = MaterialTheme.colorScheme.tertiary
+    val onSurfaceColor = MaterialTheme.colorScheme.onSurface
+    val primaryContainerColor = MaterialTheme.colorScheme.primaryContainer
+
+    // ── Brightness HUD (Swapped to RIGHT-CENTER: user swipes left side of screen) ──
     AnimatedVisibility(
         visible = visible && gestureType == GestureType.BRIGHTNESS,
-        enter = fadeIn(animationSpec = tween(150)),
-        exit  = fadeOut(animationSpec = tween(300)),
-        modifier = Modifier
-            .fillMaxSize()
-            .wrapContentSize(Alignment.CenterStart)
-            .padding(start = 28.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(cardBg)
-                .padding(horizontal = 10.dp, vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.WbSunny,
-                contentDescription = "Brightness",
-                tint = androidx.compose.ui.graphics.Color(0xFFFFD54F),
-                modifier = Modifier.size(20.dp)
-            )
-            // Vertical bar: filled bottom-to-top using a Box stack
-            Box(
-                modifier = Modifier
-                    .width(barWidth)
-                    .height(barHeight)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(androidx.compose.ui.graphics.Color.White.copy(alpha = 0.15f))
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(brightness)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    androidx.compose.ui.graphics.Color(0xFFFFD54F),
-                                    androidx.compose.ui.graphics.Color(0xFFFFF176)
-                                )
-                            )
-                        )
-                        .align(Alignment.BottomCenter)
-                )
-            }
-            Text(
-                text = "${(brightness * 100).toInt()}%",
-                color = androidx.compose.ui.graphics.Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-    }
-
-    // ── Volume HUD (right-center) ─────────────────────────────────────────────
-    AnimatedVisibility(
-        visible = visible && gestureType == GestureType.VOLUME,
         enter = fadeIn(animationSpec = tween(150)),
         exit  = fadeOut(animationSpec = tween(300)),
         modifier = Modifier
@@ -2634,53 +2824,134 @@ private fun GestureHudOverlay(
             .wrapContentSize(Alignment.CenterEnd)
             .padding(end = 28.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(cardBg)
-                .padding(horizontal = 10.dp, vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = cardColor,
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
         ) {
-            Icon(
-                imageVector = if (volume > 0f) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
-                contentDescription = "Volume",
-                tint = androidx.compose.ui.graphics.Color(0xFF80D8FF),
-                modifier = Modifier.size(20.dp)
-            )
-            Box(
-                modifier = Modifier
-                    .width(barWidth)
-                    .height(barHeight)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(androidx.compose.ui.graphics.Color.White.copy(alpha = 0.15f))
+            Column(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(volume.coerceIn(0f, 1f))
+                        .size(32.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    androidx.compose.ui.graphics.Color(0xFF29B6F6),
-                                    androidx.compose.ui.graphics.Color(0xFF80D8FF)
+                        .background(primaryContainerColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.WbSunny,
+                        contentDescription = "Brightness",
+                        tint = primaryColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Vertical bar: filled bottom-to-top using theme gradient
+                Box(
+                    modifier = Modifier
+                        .width(barWidth)
+                        .height(barHeight)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(onSurfaceColor.copy(alpha = 0.12f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(brightness.coerceIn(0f, 1f))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(primaryColor, tertiaryColor)
                                 )
                             )
-                        )
-                        .align(Alignment.BottomCenter)
+                            .align(Alignment.BottomCenter)
+                    )
+                }
+
+                Text(
+                    text = "${(brightness * 100).toInt()}",
+                    color = onSurfaceColor,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
-            Text(
-                text = "${(volume * 100).toInt()}%",
-                color = androidx.compose.ui.graphics.Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold
-            )
         }
     }
 
-    // ── Seek HUD (exact center of screen) ────────────────────────────────────
+    // ── Volume HUD (Swapped to LEFT-CENTER: user swipes right side of screen) ──────
+    AnimatedVisibility(
+        visible = visible && gestureType == GestureType.VOLUME,
+        enter = fadeIn(animationSpec = tween(150)),
+        exit  = fadeOut(animationSpec = tween(300)),
+        modifier = Modifier
+            .fillMaxSize()
+            .wrapContentSize(Alignment.CenterStart)
+            .padding(start = 28.dp)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = cardColor,
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(primaryContainerColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (volume > 0f) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                        contentDescription = "Volume",
+                        tint = primaryColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(barWidth)
+                        .height(barHeight)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(onSurfaceColor.copy(alpha = 0.12f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(volume.coerceIn(0f, 1f))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(primaryColor, tertiaryColor)
+                                )
+                            )
+                            .align(Alignment.BottomCenter)
+                    )
+                }
+
+                Text(
+                    text = "${(volume * 100).toInt()}",
+                    color = onSurfaceColor,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+
+    // ── Seek HUD (Exact Center of Screen) ───────────────────────────────────
     AnimatedVisibility(
         visible = visible && gestureType == GestureType.SEEK,
         enter = fadeIn(animationSpec = tween(150)),
@@ -2694,38 +2965,43 @@ private fun GestureHudOverlay(
         val arrow = if (seekOffsetMs >= 0) Icons.Default.FastForward else Icons.Default.FastRewind
         val sign  = if (seekOffsetMs >= 0) "+" else ""
 
-        // Column layout: the whole block is centered by wrapContentSize(Center) above.
-        // Icon + delta text share a Row so both are symmetrically centered together;
-        // the timestamp sits below, also centered.
-        Column(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = cardColor,
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Column(
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(
-                    imageVector = arrow,
-                    contentDescription = "Seek",
-                    tint = androidx.compose.ui.graphics.Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = arrow,
+                        contentDescription = "Seek",
+                        tint = primaryColor,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Text(
+                        text = "${sign}${seekSecs}s",
+                        color = onSurfaceColor,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
                 Text(
-                    text = "${sign}${seekSecs}s",
-                    color = androidx.compose.ui.graphics.Color.White,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold
+                    text = "${formatTime(seekBasePos)} → ${formatTime(projectedPos)}",
+                    color = onSurfaceColor.copy(alpha = 0.8f),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace
                 )
             }
-            Text(
-                text = "${formatTime(seekBasePos)} → ${formatTime(projectedPos)}",
-                color = androidx.compose.ui.graphics.Color.White,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-                fontFamily = FontFamily.Monospace
-            )
         }
     }
 }

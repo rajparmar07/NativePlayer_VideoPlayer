@@ -149,26 +149,30 @@ private val extractionSemaphore = Semaphore(3)
  *
  * Must be called from a coroutine (runs on [Dispatchers.IO] internally).
  */
-suspend fun getVideoThumbnail(context: Context, videoPath: String): Bitmap? =
+suspend fun getVideoThumbnail(
+    context: Context,
+    videoPath: String,
+    durationMs: Long = 0L,
+    progressMs: Long = 0L
+): Bitmap? =
     withContext(Dispatchers.IO) {
+        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        val modeName = prefs.getString("thumbnail_mode", "PERCENTAGE")
+        val percentage = prefs.getInt("thumbnail_percentage", 15).coerceIn(1, 99)
+
+        val cacheKey = "$videoPath#m$modeName#p$percentage#d$durationMs#pr$progressMs"
 
         // ── Tier 1: memory (no gate needed — instantaneous) ───────────────────
-        ThumbnailCache.get(videoPath)?.let { return@withContext it }
+        ThumbnailCache.get(cacheKey)?.let { return@withContext it }
 
         // ── Tier 2: disk (no gate needed — fast) ──────────────────────────────
-        ThumbnailDiskCache.get(context, videoPath)?.let { cached ->
-            ThumbnailCache.put(videoPath, cached)   // promote to memory
+        ThumbnailDiskCache.get(context, cacheKey)?.let { cached ->
+            ThumbnailCache.put(cacheKey, cached)   // promote to memory
             return@withContext cached
         }
 
-        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        val timeUs = prefs.getLong("thumbnail_frame_time_us", 400_000L) // Default is 10th frame (400ms)
-
         // ── Tier 3: MediaMetadataRetriever extraction (rate-limited to 3) ─────
-        // withPermit blocks until a slot is free, ensuring at most 3 heavy
-        // video-decode operations run concurrently across the whole app.
         val extracted: Bitmap? = extractionSemaphore.withPermit {
-            // Lower thread priority during H.264/H.265 decoding so it does not starve UI thread
             val oldPriority = Process.getThreadPriority(Process.myTid())
             try {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
@@ -190,6 +194,33 @@ suspend fun getVideoThumbnail(context: Context, videoPath: String): Bitmap? =
                         }
                     } else {
                         retriever.setDataSource(file.absolutePath)
+                    }
+                }
+
+                val durationUs: Long = if (durationMs > 0) {
+                    durationMs * 1000L
+                } else {
+                    val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    (durStr?.toLongOrNull() ?: 0L) * 1000L
+                }
+
+                val timeUs: Long = when (modeName) {
+                    "FIRST_FRAME" -> 0L
+                    "LAST_PLAYED" -> {
+                        if (progressMs > 0L) {
+                            progressMs * 1000L
+                        } else if (durationUs > 0L) {
+                            (durationUs * percentage) / 100L
+                        } else {
+                            400_000L
+                        }
+                    }
+                    else -> { // PERCENTAGE
+                        if (durationUs > 0L) {
+                            (durationUs * percentage) / 100L
+                        } else {
+                            400_000L
+                        }
                     }
                 }
 
@@ -216,7 +247,6 @@ suspend fun getVideoThumbnail(context: Context, videoPath: String): Bitmap? =
                 val targetW = sw.coerceAtLeast(1)
                 val targetH = sh.coerceAtLeast(1)
 
-                // Decodes frame natively to target size on API 27+ (reduces RAM overhead by 98% vs decoding full 1080p/4K)
                 val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     try {
                         retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, targetW, targetH)
@@ -232,7 +262,7 @@ suspend fun getVideoThumbnail(context: Context, videoPath: String): Bitmap? =
                         ?: retriever.getFrameAtTime()
                     if (raw != null) {
                         Bitmap.createScaledBitmap(raw, targetW, targetH, true).also {
-                            if (it != raw) raw.recycle() // free native memory immediately
+                            if (it != raw) raw.recycle()
                         }
                     } else {
                         null
@@ -240,9 +270,8 @@ suspend fun getVideoThumbnail(context: Context, videoPath: String): Bitmap? =
                 }
 
                 if (bitmap != null) {
-                    // Persist in both cache layers
-                    ThumbnailCache.put(videoPath, bitmap)
-                    ThumbnailDiskCache.put(context, videoPath, bitmap)
+                    ThumbnailCache.put(cacheKey, bitmap)
+                    ThumbnailDiskCache.put(context, cacheKey, bitmap)
                     bitmap
                 } else {
                     null
@@ -264,29 +293,30 @@ suspend fun getVideoThumbnail(context: Context, videoPath: String): Bitmap? =
 fun VideoThumbnail(
     videoPath: String,
     modifier: Modifier = Modifier,
+    durationMs: Long = 0L,
+    progressMs: Long = 0L,
     placeholder: @Composable () -> Unit
 ) {
     val context = LocalContext.current
-
-    // Synchronous init: use cached bitmap immediately if already in memory
-    var thumbnail by remember(videoPath) {
-        mutableStateOf<Bitmap?>(ThumbnailCache.get(videoPath))
+    val cacheKey = remember(videoPath, durationMs, progressMs) {
+        "$videoPath#d$durationMs#p$progressMs"
     }
 
-    LaunchedEffect(videoPath) {
+    var thumbnail by remember(cacheKey) {
+        mutableStateOf<Bitmap?>(ThumbnailCache.get(cacheKey))
+    }
+
+    LaunchedEffect(cacheKey) {
         if (thumbnail == null) {
-            // 1. Immediately check disk cache (runs on IO thread, very fast, doesn't block UI)
             val diskCached = withContext(Dispatchers.IO) {
-                ThumbnailDiskCache.get(context, videoPath)
+                ThumbnailDiskCache.get(context, cacheKey)
             }
             if (diskCached != null) {
                 thumbnail = diskCached
-                ThumbnailCache.put(videoPath, diskCached) // promote to memory cache
+                ThumbnailCache.put(cacheKey, diskCached)
             } else {
-                // 2. Cache miss on disk: heavy video extraction.
-                // Apply a settling delay so fast scrolling won't trigger heavy extractions.
                 delay(150L)
-                val bmp = getVideoThumbnail(context, videoPath)
+                val bmp = getVideoThumbnail(context, videoPath, durationMs, progressMs)
                 if (bmp != null) thumbnail = bmp
             }
         }

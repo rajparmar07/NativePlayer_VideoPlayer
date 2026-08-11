@@ -250,11 +250,28 @@ class VideoRepository(private val dao: VideoPlayerDao) {
 
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idColumn).toString()
-                        val name = cursor.getString(nameColumn) ?: "Video-$id"
-                        val path = cursor.getString(dataColumn)
-                        val duration = cursor.getLong(durationColumn)
+                        val rawName = cursor.getString(nameColumn) ?: ""
+                        val path = cursor.getString(dataColumn) ?: continue
+                        val file = File(path)
+                        if (!file.exists()) continue
+
+                        val name = if (rawName.isBlank() || rawName.startsWith("Video-")) file.name else rawName
                         val size = cursor.getLong(sizeColumn)
-                        
+                        val actualSize = if (size <= 0L) file.length() else size
+
+                        var actualDuration = cursor.getLong(durationColumn)
+                        if (actualDuration <= 0L) {
+                            val retriever = android.media.MediaMetadataRetriever()
+                            try {
+                                retriever.setDataSource(path)
+                                val durStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                actualDuration = durStr?.toLongOrNull() ?: 0L
+                            } catch (_: Exception) {
+                            } finally {
+                                try { retriever.release() } catch (_: Exception) {}
+                            }
+                        }
+
                         val rawResolution = if (resolutionColumn != -1) cursor.getString(resolutionColumn) else null
                         val parsedResolution = VideoModel.parseResolutionLabel(rawResolution)
 
@@ -263,8 +280,8 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                                 id = id,
                                 title = name,
                                 urlOrPath = path,
-                                duration = duration,
-                                size = size,
+                                duration = actualDuration,
+                                size = actualSize,
                                 isLocal = true,
                                 resolution = parsedResolution
                             )
@@ -275,6 +292,363 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                 Log.e("VideoRepository", "Failed to query media store: ${e.message}")
             }
             videosList
+        }
+    }
+
+    // Single Video File Operations
+    suspend fun renameVideoFile(context: Context, video: VideoModel, newNameRaw: String): Result<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val oldFile = File(video.urlOrPath)
+                if (!oldFile.exists()) {
+                    return@withContext Result.failure(Exception("File does not exist"))
+                }
+                
+                val ext = oldFile.extension
+                var newName = newNameRaw.trim()
+                if (ext.isNotEmpty() && !newName.endsWith(".$ext", ignoreCase = true)) {
+                    newName = "$newName.$ext"
+                }
+
+                val parentDir = oldFile.parentFile ?: return@withContext Result.failure(Exception("Invalid directory"))
+                val newFile = File(parentDir, newName)
+
+                if (newFile.exists()) {
+                    return@withContext Result.failure(Exception("A file with this name already exists"))
+                }
+
+                val success = oldFile.renameTo(newFile)
+                if (success) {
+                    // Update MediaStore
+                    android.media.MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(oldFile.absolutePath, newFile.absolutePath),
+                        null,
+                        null
+                    )
+                    Result.success(newFile.absolutePath)
+                } else {
+                    Result.failure(Exception("Failed to rename file"))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun deleteVideoFile(context: Context, video: VideoModel): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val file = File(video.urlOrPath)
+                var deleted = false
+                if (file.exists()) {
+                    deleted = file.delete()
+                }
+
+                // Delete from downloads database if present
+                deleteDownloadByFilePath(video.urlOrPath)
+
+                // Rescan / remove from MediaStore
+                android.media.MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(video.urlOrPath),
+                    null,
+                    null
+                )
+
+                Result.success(deleted)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun copyVideoFile(context: Context, video: VideoModel, targetDirPath: String): Result<String> {
+        return copyVideoFileWithProgress(context, video, targetDirPath) { _, _ -> }
+    }
+
+    suspend fun moveVideoFile(context: Context, video: VideoModel, targetDirPath: String): Result<String> {
+        return moveVideoFileWithProgress(context, video, targetDirPath) { _, _ -> }
+    }
+
+    private fun purgeFileFromMediaStore(context: Context, file: File) {
+        try {
+            val projection = arrayOf(MediaStore.Video.Media._ID)
+            val selection = "${MediaStore.Video.Media.DATA} = ?"
+            val selectionArgs = arrayOf(file.absolutePath)
+            context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
+                    val contentUri = android.content.ContentUris.withAppendedId(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+                    context.contentResolver.delete(contentUri, null, null)
+                }
+            }
+        } catch (_: Exception) {}
+
+        try {
+            context.contentResolver.delete(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                "${MediaStore.Video.Media.DATA}=?",
+                arrayOf(file.absolutePath)
+            )
+        } catch (_: Exception) {}
+    }
+
+    suspend fun copyVideoFileWithProgress(
+        context: Context,
+        video: VideoModel,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onProgress: (bytesTransferred: Long, totalBytes: Long) -> Unit
+    ): Result<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val srcFile = File(video.urlOrPath)
+                if (!srcFile.exists()) {
+                    return@withContext Result.failure(Exception("Source file does not exist"))
+                }
+
+                val targetDir = File(targetDirPath)
+                if (!targetDir.exists()) {
+                    targetDir.mkdirs()
+                }
+
+                var destFile = File(targetDir, srcFile.name)
+                if (destFile.exists()) {
+                    if (overwrite) {
+                        destFile.delete()
+                        purgeFileFromMediaStore(context, destFile)
+                    } else {
+                        val nameWithoutExt = srcFile.nameWithoutExtension
+                        val ext = srcFile.extension
+                        val newName = if (ext.isNotEmpty()) "${nameWithoutExt}_copy.$ext" else "${nameWithoutExt}_copy"
+                        destFile = File(targetDir, newName)
+                    }
+                }
+
+                val totalBytes = srcFile.length()
+                var bytesTransferred = 0L
+                val buffer = ByteArray(64 * 1024)
+                var lastReportTime = 0L
+
+                srcFile.inputStream().use { input ->
+                    destFile.outputStream().use { output ->
+                        var read = input.read(buffer)
+                        while (read != -1) {
+                            output.write(buffer, 0, read)
+                            bytesTransferred += read
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastReportTime > 100 || bytesTransferred == totalBytes) {
+                                lastReportTime = now
+                                onProgress(bytesTransferred, totalBytes)
+                            }
+                            read = input.read(buffer)
+                        }
+                    }
+                }
+
+                scanFileSuspend(context, destFile.absolutePath)
+                Result.success(destFile.absolutePath)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    private suspend fun scanFileSuspend(context: Context, path: String): String? {
+        return kotlin.coroutines.suspendCoroutine { cont ->
+            try {
+                android.media.MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(path),
+                    null
+                ) { scannedPath, _ ->
+                    cont.resumeWith(Result.success(scannedPath))
+                }
+            } catch (e: Exception) {
+                cont.resumeWith(Result.success(null))
+            }
+        }
+    }
+
+    suspend fun moveVideoFileWithProgress(
+        context: Context,
+        video: VideoModel,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onProgress: (bytesTransferred: Long, totalBytes: Long) -> Unit
+    ): Result<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val srcFile = File(video.urlOrPath)
+                if (!srcFile.exists()) {
+                    return@withContext Result.failure(Exception("Source file does not exist"))
+                }
+
+                val targetDir = File(targetDirPath)
+                if (!targetDir.exists()) {
+                    targetDir.mkdirs()
+                }
+
+                var destFile = File(targetDir, srcFile.name)
+                if (destFile.exists()) {
+                    if (overwrite) {
+                        destFile.delete()
+                        purgeFileFromMediaStore(context, destFile)
+                    } else {
+                        val nameWithoutExt = srcFile.nameWithoutExtension
+                        val ext = srcFile.extension
+                        val newName = if (ext.isNotEmpty()) "${nameWithoutExt}_moved.$ext" else "${nameWithoutExt}_moved"
+                        destFile = File(targetDir, newName)
+                    }
+                }
+
+                val totalBytes = srcFile.length()
+
+                // Try atomic OS rename first (moves file in 1ms on same storage volume & guarantees removal from source folder)
+                val movedAtomically = try { srcFile.renameTo(destFile) } catch (_: Exception) { false }
+                if (movedAtomically) {
+                    onProgress(totalBytes, totalBytes)
+                    purgeFileFromMediaStore(context, srcFile)
+                    scanFileSuspend(context, srcFile.absolutePath)
+                    scanFileSuspend(context, destFile.absolutePath)
+                    return@withContext Result.success(destFile.absolutePath)
+                }
+
+                // Fallback for cross-volume moves: Stream copy with real-time progress update
+                var bytesTransferred = 0L
+                val buffer = ByteArray(64 * 1024)
+                var lastReportTime = 0L
+
+                srcFile.inputStream().use { input ->
+                    destFile.outputStream().use { output ->
+                        var read = input.read(buffer)
+                        while (read != -1) {
+                            output.write(buffer, 0, read)
+                            bytesTransferred += read
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastReportTime > 100 || bytesTransferred == totalBytes) {
+                                lastReportTime = now
+                                onProgress(bytesTransferred, totalBytes)
+                            }
+                            read = input.read(buffer)
+                        }
+                    }
+                }
+
+                // Verify destination file created cleanly
+                if (destFile.exists() && (totalBytes == 0L || destFile.length() >= totalBytes)) {
+                    // Remove source file from storage
+                    if (srcFile.exists()) {
+                        var deleted = srcFile.delete()
+                        if (!deleted) {
+                            try {
+                                val fos = java.io.FileOutputStream(srcFile)
+                                fos.channel.truncate(0)
+                                fos.close()
+                            } catch (_: Exception) {}
+                            deleted = srcFile.delete()
+                        }
+                    }
+
+                    // Remove source record from MediaStore ContentResolver
+                    purgeFileFromMediaStore(context, srcFile)
+
+                    // Await MediaScanner indexing for both source & destination
+                    scanFileSuspend(context, srcFile.absolutePath)
+                    scanFileSuspend(context, destFile.absolutePath)
+
+                    Result.success(destFile.absolutePath)
+                } else {
+                    Result.failure(Exception("Failed to move file"))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun copyMultipleVideosWithProgress(
+        context: Context,
+        videos: List<VideoModel>,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onProgress: (overallTransferred: Long, grandTotal: Long, currentFileName: String) -> Unit
+    ): Result<Int> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val grandTotal = videos.fold(0L) { acc, v -> acc + File(v.urlOrPath).length() }
+                var overallTransferred = 0L
+                var successCount = 0
+
+                for (video in videos) {
+                    val res = copyVideoFileWithProgress(
+                        context,
+                        video,
+                        targetDirPath,
+                        overwrite
+                    ) { transferredInFile, fileTotal ->
+                        onProgress(overallTransferred + transferredInFile, grandTotal, video.title)
+                    }
+
+                    if (res.isSuccess) {
+                        successCount++
+                        overallTransferred += File(video.urlOrPath).length()
+                    }
+                }
+
+                Result.success(successCount)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun moveMultipleVideosWithProgress(
+        context: Context,
+        videos: List<VideoModel>,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onProgress: (overallTransferred: Long, grandTotal: Long, currentFileName: String) -> Unit
+    ): Result<Int> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val grandTotal = videos.fold(0L) { acc, v -> acc + File(v.urlOrPath).length() }
+                var overallTransferred = 0L
+                var successCount = 0
+
+                for (video in videos) {
+                    val fileLength = File(video.urlOrPath).length()
+                    val res = moveVideoFileWithProgress(
+                        context,
+                        video,
+                        targetDirPath,
+                        overwrite
+                    ) { transferredInFile, fileTotal ->
+                        onProgress(overallTransferred + transferredInFile, grandTotal, video.title)
+                    }
+
+                    if (res.isSuccess) {
+                        successCount++
+                        overallTransferred += fileLength
+                    }
+                }
+
+                Result.success(successCount)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
     }
 }

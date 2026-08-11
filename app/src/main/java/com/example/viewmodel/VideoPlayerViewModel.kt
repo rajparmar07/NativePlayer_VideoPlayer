@@ -5,31 +5,128 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.*
+import java.io.File
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
 enum class AppTheme {
-    Light, Dark, System
+    Light, Dark, System, Custom
+}
+
+enum class AppFontSize(val scaleFactor: Float, val label: String) {
+    Small(0.78f, "Small (78%)"),
+    Normal(0.88f, "Normal (88%)"),
+    Large(1.00f, "Large (100%)"),
+    ExtraLarge(1.15f, "Extra Large (115%)")
+}
+
+enum class AppThemePalette(val title: String, val subtitle: String, val isLightPalette: Boolean) {
+    SageMint("Sage Mint", "Light · Soft mint green & fresh teal", true),
+    SoftLavender("Soft Lavender", "Light · Gentle lavender & warm amber", true),
+    WarmSand("Warm Sand", "Light · Soothing sand & coral rose", true),
+    OceanSlate("Ocean Slate", "Dark · Soft slate navy & sky cyan", false),
+    NordicIndigo("Nordic Indigo", "Dark · Deep indigo night & ice cyan", false),
+    RoseQuartz("Rose Quartz", "Dark · Soft dusk rose & champagne gold", false)
 }
 
 enum class SubtitleStyle {
     Default, ClassicWhite, WarmYellow, CyanOutline, WhiteOnBlackBox, YellowOnBlackBox
 }
 
+enum class ThumbnailMode(val title: String, val description: String) {
+    FIRST_FRAME("First Frame (0s)", "Captures the very first frame of the video file"),
+    PERCENTAGE("Percentage of Duration", "Extracts frame based on custom video length percentage"),
+    LAST_PLAYED("Last Played Position", "Uses last played position; falls back to percentage for unplayed videos")
+}
+
+enum class ListDisplayMode(val label: String) {
+    FOLDERS("Folders"),
+    MEMORY_TREE("Memory Tree")
+}
+
+enum class ListStyle(val label: String) {
+    LIST("List"),
+    GRID("Grid")
+}
+
+enum class GridColumns(val count: Int, val label: String) {
+    TWO(2, "2 Columns"),
+    THREE(3, "3 Columns"),
+    FOUR(4, "4 Columns")
+}
+
+enum class SortField(val label: String) {
+    NAME("Name"),
+    DATE("Date Modified"),
+    SIZE("Size"),
+    DURATION("Duration")
+}
+
+enum class SortDirection(val label: String) {
+    ASCENDING("Ascending"),
+    DESCENDING("Descending")
+}
+
+enum class VideoTileInfo(val label: String, val description: String) {
+    MINIMAL("Minimal", "Video Name and Path"),
+    ESSENTIAL("Essential", "Minimal + Duration and Size"),
+    ADVANCED("Advanced", "Essential + Video type, Resolution and Seek position")
+}
+
+data class DisplaySettings(
+    val displayMode: ListDisplayMode = ListDisplayMode.FOLDERS,
+    val listStyle: ListStyle = ListStyle.LIST,
+    val gridColumns: GridColumns = GridColumns.THREE,
+    val sortField: SortField = SortField.NAME,
+    val sortDirection: SortDirection = SortDirection.ASCENDING,
+    val videoTileInfo: VideoTileInfo = VideoTileInfo.ESSENTIAL
+)
+
 class VideoPlayerViewModel(
     private val repository: VideoRepository,
     context: Context
 ) : ViewModel() {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
 
     private val _appTheme = MutableStateFlow(
-        AppTheme.valueOf(prefs.getString("app_theme", AppTheme.System.name) ?: AppTheme.System.name)
+        runCatching { AppTheme.valueOf(prefs.getString("app_theme", AppTheme.System.name) ?: AppTheme.System.name) }.getOrDefault(AppTheme.System)
     )
     val appTheme: StateFlow<AppTheme> = _appTheme.asStateFlow()
 
     fun setAppTheme(theme: AppTheme) {
         _appTheme.value = theme
         prefs.edit().putString("app_theme", theme.name).apply()
+    }
+
+    private val _appFontSize = MutableStateFlow(
+        runCatching { AppFontSize.valueOf(prefs.getString("app_font_size", AppFontSize.Normal.name) ?: AppFontSize.Normal.name) }.getOrDefault(AppFontSize.Normal)
+    )
+    val appFontSize: StateFlow<AppFontSize> = _appFontSize.asStateFlow()
+
+    fun setAppFontSize(fontSize: AppFontSize) {
+        _appFontSize.value = fontSize
+        prefs.edit().putString("app_font_size", fontSize.name).apply()
+    }
+
+    private val _appThemePalette = MutableStateFlow(
+        runCatching { AppThemePalette.valueOf(prefs.getString("app_theme_palette", AppThemePalette.OceanSlate.name) ?: AppThemePalette.OceanSlate.name) }.getOrDefault(AppThemePalette.OceanSlate)
+    )
+    val appThemePalette: StateFlow<AppThemePalette> = _appThemePalette.asStateFlow()
+
+    fun setAppThemePalette(palette: AppThemePalette) {
+        _appThemePalette.value = palette
+        prefs.edit().putString("app_theme_palette", palette.name).apply()
+    }
+
+    private val _isHighContrastDark = MutableStateFlow(
+        prefs.getBoolean("high_contrast_dark", false)
+    )
+    val isHighContrastDark: StateFlow<Boolean> = _isHighContrastDark.asStateFlow()
+
+    fun setIsHighContrastDark(enabled: Boolean) {
+        _isHighContrastDark.value = enabled
+        prefs.edit().putBoolean("high_contrast_dark", enabled).apply()
     }
 
     private val _subtitleStyle = MutableStateFlow(
@@ -73,14 +170,57 @@ class VideoPlayerViewModel(
         prefs.edit().putBoolean("pip_enabled", enabled).apply()
     }
 
-    private val _thumbnailFrameTimeUs = MutableStateFlow(
-        prefs.getLong("thumbnail_frame_time_us", 400_000L)
+    private val _audioFocusEnabled = MutableStateFlow(
+        prefs.getBoolean("audio_focus_enabled", true)
     )
-    val thumbnailFrameTimeUs: StateFlow<Long> = _thumbnailFrameTimeUs.asStateFlow()
+    val audioFocusEnabled: StateFlow<Boolean> = _audioFocusEnabled.asStateFlow()
 
-    fun setThumbnailFrameTimeUs(us: Long) {
-        _thumbnailFrameTimeUs.value = us
-        prefs.edit().putLong("thumbnail_frame_time_us", us).apply()
+    fun setAudioFocusEnabled(enabled: Boolean) {
+        _audioFocusEnabled.value = enabled
+        prefs.edit().putBoolean("audio_focus_enabled", enabled).apply()
+    }
+
+    private val _pauseOnHeadphonesDisconnectEnabled = MutableStateFlow(
+        prefs.getBoolean("pause_on_headphones_disconnect", true)
+    )
+    val pauseOnHeadphonesDisconnectEnabled: StateFlow<Boolean> = _pauseOnHeadphonesDisconnectEnabled.asStateFlow()
+
+    fun setPauseOnHeadphonesDisconnectEnabled(enabled: Boolean) {
+        _pauseOnHeadphonesDisconnectEnabled.value = enabled
+        prefs.edit().putBoolean("pause_on_headphones_disconnect", enabled).apply()
+    }
+
+    private val _thumbnailMode = MutableStateFlow(
+        run {
+            val saved = prefs.getString("thumbnail_mode", ThumbnailMode.PERCENTAGE.name)
+            try { ThumbnailMode.valueOf(saved ?: ThumbnailMode.PERCENTAGE.name) } catch (e: Exception) { ThumbnailMode.PERCENTAGE }
+        }
+    )
+    val thumbnailMode: StateFlow<ThumbnailMode> = _thumbnailMode.asStateFlow()
+
+    private val _thumbnailPercentage = MutableStateFlow(
+        prefs.getInt("thumbnail_percentage", 15)
+    )
+    val thumbnailPercentage: StateFlow<Int> = _thumbnailPercentage.asStateFlow()
+
+    fun setThumbnailMode(mode: ThumbnailMode) {
+        _thumbnailMode.value = mode
+        prefs.edit().putString("thumbnail_mode", mode.name).apply()
+        clearThumbnailCache()
+    }
+
+    fun setThumbnailPercentage(percentage: Int) {
+        val valid = percentage.coerceIn(1, 99)
+        _thumbnailPercentage.value = valid
+        prefs.edit().putInt("thumbnail_percentage", valid).apply()
+        clearThumbnailCache()
+    }
+
+    fun clearThumbnailCache() {
+        com.example.ui.components.ThumbnailCache.clear()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.ui.components.ThumbnailDiskCache.clear(appContext)
+        }
     }
 
     private val _isInPipMode = MutableStateFlow(false)
@@ -108,6 +248,113 @@ class VideoPlayerViewModel(
         _videoHeight.value = height.coerceAtLeast(1)
     }
 
+    private val _selectedVideoIds = MutableStateFlow<Set<String>>(emptySet())
+    val selectedVideoIds: StateFlow<Set<String>> = _selectedVideoIds.asStateFlow()
+
+    fun setSelectedVideoIds(ids: Set<String>) {
+        _selectedVideoIds.value = ids
+    }
+
+    fun toggleSelectVideoId(id: String) {
+        val current = _selectedVideoIds.value
+        _selectedVideoIds.value = if (current.contains(id)) current - id else current + id
+    }
+
+    fun clearSelectedVideoIds() {
+        _selectedVideoIds.value = emptySet()
+    }
+
+    private val _showBulkCopyDialog = MutableStateFlow(false)
+    val showBulkCopyDialog: StateFlow<Boolean> = _showBulkCopyDialog.asStateFlow()
+    fun setShowBulkCopyDialog(show: Boolean) { _showBulkCopyDialog.value = show }
+
+    private val _showBulkMoveDialog = MutableStateFlow(false)
+    val showBulkMoveDialog: StateFlow<Boolean> = _showBulkMoveDialog.asStateFlow()
+    fun setShowBulkMoveDialog(show: Boolean) { _showBulkMoveDialog.value = show }
+
+    private val _showBulkDeleteDialog = MutableStateFlow(false)
+    val showBulkDeleteDialog: StateFlow<Boolean> = _showBulkDeleteDialog.asStateFlow()
+    fun setShowBulkDeleteDialog(show: Boolean) { _showBulkDeleteDialog.value = show }
+
+    private val _showDisplaySettingsDialog = MutableStateFlow(false)
+    val showDisplaySettingsDialog: StateFlow<Boolean> = _showDisplaySettingsDialog.asStateFlow()
+    fun setShowDisplaySettingsDialog(show: Boolean) { _showDisplaySettingsDialog.value = show }
+
+    private val _isSearchingMode = MutableStateFlow(false)
+    val isSearchingMode: StateFlow<Boolean> = _isSearchingMode.asStateFlow()
+    fun setIsSearchingMode(searching: Boolean) {
+        _isSearchingMode.value = searching
+        if (!searching) {
+            _searchQuery.value = ""
+        }
+    }
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    fun setSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun getRootTreePath(): String {
+        val videos = localVideos.value
+        if (videos.isEmpty()) return "/storage/emulated/0"
+        val paths = videos.map { File(it.urlOrPath).parentFile?.absolutePath ?: "" }.filter { it.isNotEmpty() }
+        if (paths.isEmpty()) return "/storage/emulated/0"
+
+        var common = paths.first()
+        for (p in paths) {
+            while (!p.startsWith(common) && common.isNotEmpty()) {
+                common = File(common).parentFile?.absolutePath ?: ""
+            }
+        }
+        var rootCandidate = common.ifEmpty { "/storage/emulated/0" }
+        while (rootCandidate.isNotEmpty()) {
+            val hasDirectVids = videos.any { File(it.urlOrPath).parentFile?.absolutePath == rootCandidate }
+            if (hasDirectVids) break
+            val childSubdirs = videos.mapNotNull { video ->
+                val p = File(video.urlOrPath).parentFile ?: return@mapNotNull null
+                var curr: File? = p
+                var child: File? = null
+                while (curr != null) {
+                    if (curr.absolutePath == rootCandidate && child != null) return@mapNotNull child.absolutePath
+                    child = curr
+                    curr = curr.parentFile
+                }
+                null
+            }.distinct()
+            if (childSubdirs.size == 1) {
+                rootCandidate = childSubdirs.first()
+            } else {
+                break
+            }
+        }
+        return if (rootCandidate.isEmpty()) "/storage/emulated/0" else rootCandidate
+    }
+
+    fun resolveParentBranchingPath(currPath: String, rootTreePath: String, localVideos: List<VideoModel>): String? {
+        var parent = File(currPath).parentFile?.absolutePath ?: return null
+        while (parent.startsWith(rootTreePath) && parent != rootTreePath) {
+            val hasDirectVids = localVideos.any { File(it.urlOrPath).parentFile?.absolutePath == parent }
+            if (hasDirectVids) return parent
+
+            val childSubdirs = localVideos.mapNotNull { video ->
+                val p = File(video.urlOrPath).parentFile ?: return@mapNotNull null
+                var curr: File? = p
+                var child: File? = null
+                while (curr != null) {
+                    if (curr.absolutePath == parent && child != null) return@mapNotNull child.absolutePath
+                    child = curr
+                    curr = curr.parentFile
+                }
+                null
+            }.distinct()
+
+            if (childSubdirs.size > 1) return parent
+            parent = File(parent).parentFile?.absolutePath ?: return rootTreePath
+        }
+        return if (parent.startsWith(rootTreePath)) rootTreePath else null
+    }
+
     enum class PlaybackCommand {
         PLAY, PAUSE
     }
@@ -127,6 +374,18 @@ class VideoPlayerViewModel(
         }
     }
 
+data class VideoPlaybackState(
+    val progressMs: Long,
+    val durationMs: Long,
+    val audioGroupIndex: Int? = null,
+    val audioTrackIndex: Int? = null,
+    val audioLanguage: String? = null,
+    val subtitleGroupIndex: Int? = null,
+    val subtitleTrackIndex: Int? = null,
+    val subtitleLanguage: String? = null,
+    val isSubtitleDisabled: Boolean = true
+)
+
     private val _videoProgressMap = MutableStateFlow<Map<String, Pair<Long, Long>>>(emptyMap())
     val videoProgressMap: StateFlow<Map<String, Pair<Long, Long>>> = _videoProgressMap.asStateFlow()
 
@@ -140,7 +399,7 @@ class VideoPlayerViewModel(
             if (key.startsWith("progress_") && value is String) {
                 val urlOrPath = key.substringAfter("progress_")
                 val parts = value.split(":")
-                if (parts.size == 2) {
+                if (parts.size >= 2) {
                     val progress = parts[0].toLongOrNull()
                     val duration = parts[1].toLongOrNull()
                     if (progress != null && duration != null) {
@@ -152,13 +411,71 @@ class VideoPlayerViewModel(
         return map
     }
 
-    fun saveVideoProgress(urlOrPath: String, progressMs: Long, durationMs: Long) {
+    fun getVideoPlaybackState(urlOrPath: String): VideoPlaybackState? {
+        val stringVal = prefs.getString("progress_$urlOrPath", null) ?: return null
+        val parts = stringVal.split(":")
+        if (parts.size >= 2) {
+            val progress = parts[0].toLongOrNull() ?: return null
+            val duration = parts[1].toLongOrNull() ?: return null
+            var audioGroup: Int? = null
+            var audioTrack: Int? = null
+            var audioLang: String? = null
+            var subGroup: Int? = null
+            var subTrack: Int? = null
+            var subLang: String? = null
+            var isSubDisabled = true
+
+            if (parts.size >= 9) {
+                audioGroup = parts[2].toIntOrNull()
+                audioTrack = parts[3].toIntOrNull()
+                audioLang = parts[4].ifEmpty { null }
+                subGroup = parts[5].toIntOrNull()
+                subTrack = parts[6].toIntOrNull()
+                subLang = parts[7].ifEmpty { null }
+                isSubDisabled = parts[8] == "1"
+            }
+            return VideoPlaybackState(
+                progressMs = progress,
+                durationMs = duration,
+                audioGroupIndex = audioGroup,
+                audioTrackIndex = audioTrack,
+                audioLanguage = audioLang,
+                subtitleGroupIndex = subGroup,
+                subtitleTrackIndex = subTrack,
+                subtitleLanguage = subLang,
+                isSubtitleDisabled = isSubDisabled
+            )
+        }
+        return null
+    }
+
+    fun saveVideoProgress(
+        urlOrPath: String,
+        progressMs: Long,
+        durationMs: Long,
+        audioGroupIndex: Int? = null,
+        audioTrackIndex: Int? = null,
+        audioLanguage: String? = null,
+        subtitleGroupIndex: Int? = null,
+        subtitleTrackIndex: Int? = null,
+        subtitleLanguage: String? = null,
+        isSubtitleDisabled: Boolean = true
+    ) {
         if (durationMs <= 0) return
         val isWatchedWhole = progressMs >= durationMs - 5000 && progressMs >= (durationMs * 0.95).toLong()
         if (isWatchedWhole) {
             prefs.edit().remove("progress_$urlOrPath").commit()
         } else {
-            prefs.edit().putString("progress_$urlOrPath", "$progressMs:$durationMs").commit()
+            val audioGroupStr = audioGroupIndex?.toString() ?: ""
+            val audioTrackStr = audioTrackIndex?.toString() ?: ""
+            val audioLangStr = audioLanguage ?: ""
+            val subGroupStr = subtitleGroupIndex?.toString() ?: ""
+            val subTrackStr = subtitleTrackIndex?.toString() ?: ""
+            val subLangStr = subtitleLanguage ?: ""
+            val subDisabledStr = if (isSubtitleDisabled) "1" else "0"
+
+            val value = "$progressMs:$durationMs:$audioGroupStr:$audioTrackStr:$audioLangStr:$subGroupStr:$subTrackStr:$subLangStr:$subDisabledStr"
+            prefs.edit().putString("progress_$urlOrPath", value).commit()
         }
         _videoProgressMap.value = loadVideoProgressMap()
     }
@@ -170,6 +487,48 @@ class VideoPlayerViewModel(
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
+    // Display & Layout Settings persistent state
+    private fun loadDisplaySettings(): DisplaySettings {
+        val modeStr = prefs.getString("display_mode", ListDisplayMode.FOLDERS.name)
+        val styleStr = prefs.getString("list_style", ListStyle.LIST.name)
+        val gridColsStr = prefs.getString("grid_columns", GridColumns.THREE.name)
+        val sortFieldStr = prefs.getString("sort_field", SortField.NAME.name)
+        val sortDirStr = prefs.getString("sort_direction", SortDirection.ASCENDING.name)
+        val tileInfoStr = prefs.getString("video_tile_info", VideoTileInfo.ESSENTIAL.name)
+
+        val mode = runCatching { ListDisplayMode.valueOf(modeStr!!) }.getOrDefault(ListDisplayMode.FOLDERS)
+        val style = runCatching { ListStyle.valueOf(styleStr!!) }.getOrDefault(ListStyle.LIST)
+        val gridCols = runCatching { GridColumns.valueOf(gridColsStr!!) }.getOrDefault(GridColumns.THREE)
+        val sortField = runCatching { SortField.valueOf(sortFieldStr!!) }.getOrDefault(SortField.NAME)
+        val sortDir = runCatching { SortDirection.valueOf(sortDirStr!!) }.getOrDefault(SortDirection.ASCENDING)
+        val tileInfo = runCatching { VideoTileInfo.valueOf(tileInfoStr!!) }.getOrDefault(VideoTileInfo.ESSENTIAL)
+
+        return DisplaySettings(
+            displayMode = mode,
+            listStyle = style,
+            gridColumns = gridCols,
+            sortField = sortField,
+            sortDirection = sortDir,
+            videoTileInfo = tileInfo
+        )
+    }
+
+    private val _displaySettings = MutableStateFlow(loadDisplaySettings())
+    val displaySettings: StateFlow<DisplaySettings> = _displaySettings.asStateFlow()
+
+    fun updateDisplaySettings(newSettings: DisplaySettings) {
+        _displaySettings.value = newSettings
+        prefs.edit()
+            .putString("display_mode", newSettings.displayMode.name)
+            .putString("list_style", newSettings.listStyle.name)
+            .putString("grid_columns", newSettings.gridColumns.name)
+            .putString("sort_field", newSettings.sortField.name)
+            .putString("sort_direction", newSettings.sortDirection.name)
+            .putString("video_tile_info", newSettings.videoTileInfo.name)
+            .apply()
+        _isGridView.value = (newSettings.listStyle == ListStyle.GRID)
+    }
+
     // Local Library persistent UI States
     private val _selectedFolder = MutableStateFlow<String?>(null)
     val selectedFolder: StateFlow<String?> = _selectedFolder.asStateFlow()
@@ -178,11 +537,22 @@ class VideoPlayerViewModel(
         _selectedFolder.value = folder
     }
 
-    private val _isGridView = MutableStateFlow(false)
+    private val _selectedTreePath = MutableStateFlow<String?>(null)
+    val selectedTreePath: StateFlow<String?> = _selectedTreePath.asStateFlow()
+
+    fun setSelectedTreePath(path: String?) {
+        _selectedTreePath.value = path
+    }
+
+    private val _isGridView = MutableStateFlow(_displaySettings.value.listStyle == ListStyle.GRID)
     val isGridView: StateFlow<Boolean> = _isGridView.asStateFlow()
 
     fun setGridView(isGrid: Boolean) {
         _isGridView.value = isGrid
+        val newStyle = if (isGrid) ListStyle.GRID else ListStyle.LIST
+        if (_displaySettings.value.listStyle != newStyle) {
+            updateDisplaySettings(_displaySettings.value.copy(listStyle = newStyle))
+        }
     }
 
     // Active Playback states
@@ -208,6 +578,18 @@ class VideoPlayerViewModel(
     fun setFastSeekEnabled(enabled: Boolean) {
         _fastSeekEnabled.value = enabled
         prefs.edit().putBoolean("fast_seek_enabled", enabled).apply()
+    }
+
+    // Dynamic player surface skip button duration (defaults to 10s)
+    private val _buttonSeekSeconds = MutableStateFlow(
+        prefs.getInt("button_seek_seconds", 10)
+    )
+    val buttonSeekSeconds: StateFlow<Int> = _buttonSeekSeconds.asStateFlow()
+
+    fun setButtonSeekSeconds(seconds: Int) {
+        val validSeconds = if (seconds in listOf(5, 10, 15, 30, 60)) seconds else 10
+        _buttonSeekSeconds.value = validSeconds
+        prefs.edit().putInt("button_seek_seconds", validSeconds).apply()
     }
 
     // Gesture seek sensitivity (configurable, later exposed in Settings)
@@ -418,7 +800,275 @@ class VideoPlayerViewModel(
             repository.deleteDownloadByFilePath(filePath)
         }
     }
+
+    fun renameVideo(context: Context, video: VideoModel, newName: String, onResult: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            val res = repository.renameVideoFile(context, video, newName)
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, res.getOrNull())
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun deleteVideo(context: Context, video: VideoModel, onResult: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            val res = repository.deleteVideoFile(context, video)
+            if (res.isSuccess) {
+                prefs.edit().remove("progress_${video.urlOrPath}").commit()
+                scanLocalVideos(context)
+                onResult(true, null)
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun copyVideo(context: Context, video: VideoModel, targetDirPath: String, onResult: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            val res = repository.copyVideoFile(context, video, targetDirPath)
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, res.getOrNull())
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun moveVideo(context: Context, video: VideoModel, targetDirPath: String, onResult: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            val res = repository.moveVideoFile(context, video, targetDirPath)
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, res.getOrNull())
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    // Real-Time File Operation Progress State
+    private val _fileOperationState = MutableStateFlow<FileOperationState?>(null)
+    val fileOperationState: StateFlow<FileOperationState?> = _fileOperationState.asStateFlow()
+
+    fun copyVideoWithProgress(
+        context: Context,
+        video: VideoModel,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            val opTitle = "Copying Video"
+            _fileOperationState.value = FileOperationState(
+                isRunning = true,
+                title = opTitle,
+                videoTitle = video.title,
+                targetFolder = targetDirPath,
+                progressRatio = 0f,
+                bytesTransferred = 0L,
+                totalBytes = video.size
+            )
+
+            val res = repository.copyVideoFileWithProgress(context, video, targetDirPath, overwrite) { transferred, total ->
+                val ratio = if (total > 0) (transferred.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                _fileOperationState.value = FileOperationState(
+                    isRunning = true,
+                    title = opTitle,
+                    videoTitle = video.title,
+                    targetFolder = targetDirPath,
+                    progressRatio = ratio,
+                    bytesTransferred = transferred,
+                    totalBytes = total
+                )
+            }
+
+            _fileOperationState.value = null
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, res.getOrNull())
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun moveVideoWithProgress(
+        context: Context,
+        video: VideoModel,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            val opTitle = "Moving Video"
+            _fileOperationState.value = FileOperationState(
+                isRunning = true,
+                title = opTitle,
+                videoTitle = video.title,
+                targetFolder = targetDirPath,
+                progressRatio = 0f,
+                bytesTransferred = 0L,
+                totalBytes = video.size
+            )
+
+            val res = repository.moveVideoFileWithProgress(context, video, targetDirPath, overwrite) { transferred, total ->
+                val ratio = if (total > 0) (transferred.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                _fileOperationState.value = FileOperationState(
+                    isRunning = true,
+                    title = opTitle,
+                    videoTitle = video.title,
+                    targetFolder = targetDirPath,
+                    progressRatio = ratio,
+                    bytesTransferred = transferred,
+                    totalBytes = total
+                )
+            }
+
+            _fileOperationState.value = null
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, res.getOrNull())
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun copyMultipleVideosWithProgress(
+        context: Context,
+        videos: List<VideoModel>,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            if (videos.isEmpty()) {
+                onResult(true, null)
+                return@launch
+            }
+
+            val grandTotal = videos.fold(0L) { acc, v -> acc + File(v.urlOrPath).length() }
+            val opTitle = "Copying ${videos.size} Videos"
+
+            _fileOperationState.value = FileOperationState(
+                isRunning = true,
+                title = opTitle,
+                videoTitle = videos.first().title,
+                targetFolder = targetDirPath,
+                progressRatio = 0f,
+                bytesTransferred = 0L,
+                totalBytes = grandTotal
+            )
+
+            val res = repository.copyMultipleVideosWithProgress(context, videos, targetDirPath, overwrite) { transferred, total, currFile ->
+                val ratio = if (total > 0) (transferred.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                _fileOperationState.value = FileOperationState(
+                    isRunning = true,
+                    title = opTitle,
+                    videoTitle = currFile,
+                    targetFolder = targetDirPath,
+                    progressRatio = ratio,
+                    bytesTransferred = transferred,
+                    totalBytes = total
+                )
+            }
+
+            _fileOperationState.value = null
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, null)
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun moveMultipleVideosWithProgress(
+        context: Context,
+        videos: List<VideoModel>,
+        targetDirPath: String,
+        overwrite: Boolean = false,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            if (videos.isEmpty()) {
+                onResult(true, null)
+                return@launch
+            }
+
+            val grandTotal = videos.fold(0L) { acc, v -> acc + File(v.urlOrPath).length() }
+            val opTitle = "Moving ${videos.size} Videos"
+
+            _fileOperationState.value = FileOperationState(
+                isRunning = true,
+                title = opTitle,
+                videoTitle = videos.first().title,
+                targetFolder = targetDirPath,
+                progressRatio = 0f,
+                bytesTransferred = 0L,
+                totalBytes = grandTotal
+            )
+
+            val res = repository.moveMultipleVideosWithProgress(context, videos, targetDirPath, overwrite) { transferred, total, currFile ->
+                val ratio = if (total > 0) (transferred.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                _fileOperationState.value = FileOperationState(
+                    isRunning = true,
+                    title = opTitle,
+                    videoTitle = currFile,
+                    targetFolder = targetDirPath,
+                    progressRatio = ratio,
+                    bytesTransferred = transferred,
+                    totalBytes = total
+                )
+            }
+
+            _fileOperationState.value = null
+            if (res.isSuccess) {
+                scanLocalVideos(context)
+                onResult(true, null)
+            } else {
+                onResult(false, res.exceptionOrNull()?.message)
+            }
+        }
+    }
+
+    fun deleteMultipleVideos(
+        context: Context,
+        videos: List<VideoModel>,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            var successCount = 0
+            for (v in videos) {
+                val res = repository.deleteVideoFile(context, v)
+                if (res.isSuccess) {
+                    successCount++
+                }
+            }
+            scanLocalVideos(context)
+            if (successCount > 0) {
+                onResult(true, null)
+            } else {
+                onResult(false, "Failed to delete files")
+            }
+        }
+    }
 }
+
+data class FileOperationState(
+    val isRunning: Boolean = false,
+    val title: String = "",
+    val videoTitle: String = "",
+    val targetFolder: String = "",
+    val progressRatio: Float = 0f,
+    val bytesTransferred: Long = 0L,
+    val totalBytes: Long = 0L
+)
+
 
 class VideoPlayerViewModelFactory(
     private val repository: VideoRepository,

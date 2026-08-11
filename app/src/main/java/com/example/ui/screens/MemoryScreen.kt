@@ -55,7 +55,10 @@ private suspend fun calculateStats(context: Context): MemoryStats = withContext(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MemoryScreen(onBack: () -> Unit) {
+fun MemoryScreen(
+    onBack: () -> Unit,
+    includeTopBar: Boolean = true
+) {
     val context    = LocalContext.current
     val scope      = rememberCoroutineScope()
     val snackbar   = remember { SnackbarHostState() }
@@ -76,76 +79,38 @@ fun MemoryScreen(onBack: () -> Unit) {
         isLoading = false
     }
 
-    Scaffold(
-        topBar = {
-            Surface(
-                modifier       = Modifier.fillMaxWidth(),
-                shape          = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                color          = MaterialTheme.colorScheme.surface,
-                shadowElevation = 4.dp
-            ) {
-                TopAppBar(
-                    title = {
-                        Text(
-                            text       = "Memory & Cache",
-                            fontWeight = FontWeight.Bold,
-                            fontSize   = 20.sp
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                imageVector     = Icons.Default.ArrowBack,
-                                contentDescription = "Back"
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor          = MaterialTheme.colorScheme.surface,
-                        titleContentColor       = MaterialTheme.colorScheme.onBackground,
-                        navigationIconContentColor = MaterialTheme.colorScheme.onBackground
-                    )
-                )
-            }
-        },
-        snackbarHost   = { SnackbarHost(snackbar) },
-        containerColor = MaterialTheme.colorScheme.background
-    ) { pad ->
-
-        // ── Loading state ────────────────────────────────────────────────────
-        if (isLoading) {
-            Box(
-                modifier           = Modifier.fillMaxSize().padding(pad),
-                contentAlignment   = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    CircularProgressIndicator()
-                    Text(
-                        text  = "Calculating storage…",
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            return@Scaffold
-        }
-
-        // ── Content ──────────────────────────────────────────────────────────
-        val s = stats ?: return@Scaffold
+    val bodyContent: @Composable (PaddingValues) -> Unit = { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(pad)
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // ── Overview card ────────────────────────────────────────────────
+            // ── Loading state ────────────────────────────────────────────────────
+            if (isLoading) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text(
+                            text = "Calculating storage…",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                val s = stats
+                if (s != null) {
+                    // ── Overview card ────────────────────────────────────────────────
             Card(
                 modifier  = Modifier.fillMaxWidth(),
                 shape     = RoundedCornerShape(20.dp),
@@ -227,56 +192,56 @@ fun MemoryScreen(onBack: () -> Unit) {
                 }
             }
 
-            // ── Breakdown section ────────────────────────────────────────────
-            Text(
-                text       = "Breakdown",
-                fontSize   = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color      = MaterialTheme.colorScheme.primary,
-                modifier   = Modifier.padding(top = 6.dp, start = 4.dp)
-            )
+            Spacer(modifier = Modifier.height(16.dp))
 
-            StorageItemCard(
-                icon      = Icons.Default.Image,
-                iconTint  = thumbColor,
-                iconBg    = thumbColor.copy(alpha = 0.15f),
-                title     = "Thumbnail Cache",
-                subtitle  = "${formatSize(s.thumbnailBytes)} · ${s.thumbnailCount} cached thumbnails",
-                badge     = "Clearable",
-                badgeColor      = MaterialTheme.colorScheme.tertiaryContainer,
-                badgeTextColor  = MaterialTheme.colorScheme.onTertiaryContainer
-            )
+            // Single unified Breakdown Card
+            Card(
+                modifier  = Modifier.fillMaxWidth(),
+                shape     = RoundedCornerShape(16.dp),
+                colors    = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    StorageItemRow(
+                        icon      = Icons.Default.Image,
+                        iconTint  = thumbColor,
+                        iconBg    = thumbColor.copy(alpha = 0.15f),
+                        title     = "Thumbnail Cache",
+                        subtitle  = "${formatSize(s.thumbnailBytes)} · ${s.thumbnailCount} cached thumbnails",
+                        badge     = "Clearable",
+                        badgeColor      = MaterialTheme.colorScheme.tertiaryContainer,
+                        badgeTextColor  = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
 
-            StorageItemCard(
-                icon      = Icons.Default.Storage,
-                iconTint  = dbColor,
-                iconBg    = dbColor.copy(alpha = 0.15f),
-                title     = "App Database",
-                subtitle  = "${formatSize(s.databaseBytes)} · Playlists & metadata",
-                badge     = null,
-                badgeColor      = Color.Transparent,
-                badgeTextColor  = Color.Transparent
-            )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
 
-            StorageItemCard(
-                icon      = Icons.Default.Download,
-                iconTint  = dlColor,
-                iconBg    = dlColor.copy(alpha = 0.15f),
-                title     = "Downloaded Videos",
-                subtitle  = "${formatSize(s.downloadedFilesBytes)} · Video files stored on device",
-                badge     = null,
-                badgeColor      = Color.Transparent,
-                badgeTextColor  = Color.Transparent
-            )
+                    StorageItemRow(
+                        icon      = Icons.Default.Storage,
+                        iconTint  = dbColor,
+                        iconBg    = dbColor.copy(alpha = 0.15f),
+                        title     = "App Database",
+                        subtitle  = "${formatSize(s.databaseBytes)} · Playlists & metadata"
+                    )
 
-            // ── Actions section ──────────────────────────────────────────────
-            Text(
-                text       = "Actions",
-                fontSize   = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color      = MaterialTheme.colorScheme.primary,
-                modifier   = Modifier.padding(top = 6.dp, start = 4.dp)
-            )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
+
+                    StorageItemRow(
+                        icon      = Icons.Default.Download,
+                        iconTint  = dlColor,
+                        iconBg    = dlColor.copy(alpha = 0.15f),
+                        title     = "Downloaded Videos",
+                        subtitle  = "${formatSize(s.downloadedFilesBytes)} · Video files stored on device"
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             Card(
                 modifier  = Modifier.fillMaxWidth(),
@@ -288,9 +253,10 @@ fun MemoryScreen(onBack: () -> Unit) {
                     modifier            = Modifier.padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.Top) {
                         Box(
                             modifier          = Modifier
+                                .padding(top = 2.dp)
                                 .size(44.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(MaterialTheme.colorScheme.errorContainer),
@@ -315,6 +281,7 @@ fun MemoryScreen(onBack: () -> Unit) {
                             Text(
                                 text     = "Frees ${formatSize(s.thumbnailBytes)} · Thumbnails regenerate as you browse",
                                 fontSize = 12.sp,
+                                lineHeight = 16.sp,
                                 color    = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -345,8 +312,53 @@ fun MemoryScreen(onBack: () -> Unit) {
                 }
             }
 
+                }
+            }
+
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (includeTopBar) {
+        Scaffold(
+            topBar = {
+                Surface(
+                    modifier       = Modifier.fillMaxWidth(),
+                    shape          = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+                    color          = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 4.dp
+                ) {
+                    TopAppBar(
+                        title = {
+                            Text(
+                                text       = "Memory & Cache",
+                                fontWeight = FontWeight.Bold,
+                                fontSize   = 20.sp
+                            )
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = onBack) {
+                                Icon(
+                                    imageVector     = Icons.Default.ArrowBack,
+                                    contentDescription = "Back"
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor          = MaterialTheme.colorScheme.surface,
+                            titleContentColor       = MaterialTheme.colorScheme.onBackground,
+                            navigationIconContentColor = MaterialTheme.colorScheme.onBackground
+                        )
+                    )
+                }
+            },
+            snackbarHost   = { SnackbarHost(snackbar) },
+            containerColor = MaterialTheme.colorScheme.background
+        ) { pad ->
+            bodyContent(pad)
+        }
+    } else {
+        bodyContent(PaddingValues(0.dp))
     }
 
     // ── Clear confirmation dialog ─────────────────────────────────────────────
@@ -417,69 +429,63 @@ private fun StorageLegendDot(color: Color, label: String) {
 }
 
 @Composable
-private fun StorageItemCard(
+private fun StorageItemRow(
     icon: ImageVector,
     iconTint: Color,
     iconBg: Color,
     title: String,
     subtitle: String,
-    badge: String?,
-    badgeColor: Color,
-    badgeTextColor: Color
+    badge: String? = null,
+    badgeColor: Color = Color.Transparent,
+    badgeTextColor: Color = Color.Transparent
 ) {
-    Card(
-        modifier  = Modifier.fillMaxWidth(),
-        shape     = RoundedCornerShape(16.dp),
-        colors    = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    Row(
+        modifier          = Modifier.fillMaxWidth().padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier          = Modifier.fillMaxWidth().padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Box(
+            modifier         = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(iconBg),
+            contentAlignment = Alignment.Center
         ) {
+            Icon(
+                imageVector        = icon,
+                contentDescription = null,
+                tint               = iconTint,
+                modifier           = Modifier.size(22.dp)
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text       = title,
+                fontWeight = FontWeight.SemiBold,
+                fontSize   = 14.sp,
+                color      = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text     = subtitle,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                color    = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (badge != null) {
             Box(
-                modifier         = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(iconBg),
-                contentAlignment = Alignment.Center
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(badgeColor)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
-                Icon(
-                    imageVector        = icon,
-                    contentDescription = null,
-                    tint               = iconTint,
-                    modifier           = Modifier.size(24.dp)
-                )
-            }
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text       = title,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize   = 15.sp,
-                    color      = MaterialTheme.colorScheme.onSurface
+                    text       = badge,
+                    fontSize   = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color      = badgeTextColor
                 )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text     = subtitle,
-                    fontSize = 12.sp,
-                    color    = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (badge != null) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(badgeColor)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text       = badge,
-                        fontSize   = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color      = badgeTextColor
-                    )
-                }
             }
         }
     }

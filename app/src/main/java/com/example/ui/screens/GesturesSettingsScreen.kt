@@ -26,7 +26,8 @@ import com.example.viewmodel.VideoPlayerViewModel
 @Composable
 fun GesturesSettingsScreen(
     viewModel: VideoPlayerViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    includeTopBar: Boolean = true
 ) {
     val seekGestureEnabled by viewModel.seekGestureEnabled.collectAsState()
     val volumeGestureEnabled by viewModel.volumeGestureEnabled.collectAsState()
@@ -39,43 +40,7 @@ fun GesturesSettingsScreen(
     val brightnessSensitivity by viewModel.brightnessSensitivity.collectAsState()
     val zoomSensitivity by viewModel.zoomSensitivity.collectAsState()
 
-    Scaffold(
-        topBar = {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 4.dp
-            ) {
-                TopAppBar(
-                    title = {
-                        Text(
-                            text = "Gestures",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 20.sp
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier.testTag("gestures_settings_back_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowBack,
-                                contentDescription = "Back"
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        titleContentColor = MaterialTheme.colorScheme.onBackground,
-                        navigationIconContentColor = MaterialTheme.colorScheme.onBackground
-                    )
-                )
-            }
-        },
-        containerColor = MaterialTheme.colorScheme.background
-    ) { innerPadding ->
+    val bodyContent: @Composable (PaddingValues) -> Unit = { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -85,404 +50,434 @@ fun GesturesSettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text(
-                text = "Gesture Preferences & Sensitivities",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-
-            // Card 1: Seek Gesture Settings
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 2.dp)
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FastForward,
-                                contentDescription = "Seek Gesture Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(16.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Seek Gesture",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Horizontal swipe to seek forward/backward",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Switch(
-                            checked = seekGestureEnabled,
-                            onCheckedChange = { viewModel.setSeekGestureEnabled(it) },
-                            modifier = Modifier.padding(top = 2.dp).testTag("seek_gesture_switch")
-                        )
-                    }
-
-                    if (seekGestureEnabled) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        // Sub-option 1: Seek Step Ms
-                        val currentSeekStepSec = (seekStepMs / 1000).toInt().coerceIn(1, 10)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // Item 1: Seek Gesture Settings
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.Top
                         ) {
-                            Text(
-                                text = "Seek Step Interval",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${currentSeekStepSec}s",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("gestures_seek_step_value")
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FastForward,
+                                    contentDescription = "Seek Gesture Icon",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(16.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Seek Gesture",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Horizontal swipe to seek forward/backward",
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Switch(
+                                checked = seekGestureEnabled,
+                                onCheckedChange = { viewModel.setSeekGestureEnabled(it) },
+                                modifier = Modifier.padding(top = 2.dp).testTag("seek_gesture_switch")
                             )
                         }
-                        Slider(
-                            value = currentSeekStepSec.toFloat(),
-                            onValueChange = { viewModel.setGestureSeekMs(it.toLong() * 1000L) },
-                            valueRange = 1f..10f,
-                            steps = 8,
-                            modifier = Modifier.testTag("gestures_seek_step_slider")
-                        )
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        if (seekGestureEnabled) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            Spacer(modifier = Modifier.height(16.dp))
 
-                        // Sub-option 2: Seek Swipe Pixels
+                            // Sub-option 1: Seek Step Ms
+                            val currentSeekStepSec = (seekStepMs / 1000).toInt().coerceIn(1, 10)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Seek Step Interval",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "${currentSeekStepSec}s",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("gestures_seek_step_value")
+                                )
+                            }
+                            Slider(
+                                value = currentSeekStepSec.toFloat(),
+                                onValueChange = { viewModel.setGestureSeekMs(it.toLong() * 1000L) },
+                                valueRange = 1f..10f,
+                                steps = 8,
+                                modifier = Modifier.testTag("gestures_seek_step_slider")
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Sub-option 2: Seek Swipe Pixels
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Swipe Sensitivity (distance per step)",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "${seekSwipePixels}px",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("gestures_seek_pixels_value")
+                                )
+                            }
+                            Slider(
+                                value = seekSwipePixels.toFloat(),
+                                onValueChange = { viewModel.setSeekSwipePixels(it.toInt()) },
+                                valueRange = 20f..150f,
+                                steps = 12,
+                                modifier = Modifier.testTag("gestures_seek_pixels_slider")
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
+
+                    // Item 2: Volume Gesture Settings
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.Top
                         ) {
-                            Text(
-                                text = "Swipe Sensitivity (distance per step)",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${seekSwipePixels}px",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("gestures_seek_pixels_value")
-                            )
-                        }
-                        Slider(
-                            value = seekSwipePixels.toFloat(),
-                            onValueChange = { viewModel.setSeekSwipePixels(it.toInt()) },
-                            valueRange = 20f..150f,
-                            steps = 12,
-                            modifier = Modifier.testTag("gestures_seek_pixels_slider")
-                        )
-                    }
-                }
-            }
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = "Volume Gesture Icon",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.width(16.dp))
 
-            // Card 2: Volume Gesture Settings
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 2.dp)
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.VolumeUp,
-                                contentDescription = "Volume Gesture Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Volume Gesture",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Vertical swipe on right side to adjust volume",
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Switch(
+                                checked = volumeGestureEnabled,
+                                onCheckedChange = { viewModel.setVolumeGestureEnabled(it) },
+                                modifier = Modifier.padding(top = 2.dp).testTag("volume_gesture_switch")
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        if (volumeGestureEnabled) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            Spacer(modifier = Modifier.height(16.dp))
 
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Volume Gesture",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Vertical swipe on right side to adjust volume",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            // Sub-option: Volume Swipe Pixels
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Volume Swipe Distance (full scale)",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "${volumeSwipePixels}px",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("gestures_volume_pixels_value")
+                                )
+                            }
+                            Slider(
+                                value = volumeSwipePixels.toFloat(),
+                                onValueChange = { viewModel.setVolumeSwipePixels(it.toInt()) },
+                                valueRange = 200f..2000f,
+                                steps = 17,
+                                modifier = Modifier.testTag("gestures_volume_pixels_slider")
                             )
                         }
-
-                        Switch(
-                            checked = volumeGestureEnabled,
-                            onCheckedChange = { viewModel.setVolumeGestureEnabled(it) },
-                            modifier = Modifier.padding(top = 2.dp).testTag("volume_gesture_switch")
-                        )
                     }
 
-                    if (volumeGestureEnabled) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                        Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
 
-                        // Sub-option: Volume Swipe Pixels
+                    // Item 3: Brightness Gesture Settings
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.Top
                         ) {
-                            Text(
-                                text = "Volume Swipe Distance (full scale)",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${volumeSwipePixels}px",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("gestures_volume_pixels_value")
-                            )
-                        }
-                        Slider(
-                            value = volumeSwipePixels.toFloat(),
-                            onValueChange = { viewModel.setVolumeSwipePixels(it.toInt()) },
-                            valueRange = 200f..2000f,
-                            steps = 17,
-                            modifier = Modifier.testTag("gestures_volume_pixels_slider")
-                        )
-                    }
-                }
-            }
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Brightness5,
+                                    contentDescription = "Brightness Gesture Icon",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.width(16.dp))
 
-            // Card 3: Brightness Gesture Settings
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 2.dp)
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Brightness5,
-                                contentDescription = "Brightness Gesture Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Brightness Gesture",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Vertical swipe on left side to adjust screen brightness",
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Switch(
+                                checked = brightnessGestureEnabled,
+                                onCheckedChange = { viewModel.setBrightnessGestureEnabled(it) },
+                                modifier = Modifier.padding(top = 2.dp).testTag("brightness_gesture_switch")
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        if (brightnessGestureEnabled) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            Spacer(modifier = Modifier.height(16.dp))
 
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Brightness Gesture",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Vertical swipe on left side to adjust screen brightness",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            // Sub-option: Brightness Sensitivity
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Brightness Sensitivity",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "%.4f".format(brightnessSensitivity),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("gestures_brightness_sensitivity_value")
+                                )
+                            }
+                            Slider(
+                                value = brightnessSensitivity,
+                                onValueChange = { viewModel.setBrightnessSensitivity(it) },
+                                valueRange = 0.0005f..0.0050f,
+                                steps = 44,
+                                modifier = Modifier.testTag("gestures_brightness_sensitivity_slider")
                             )
                         }
-
-                        Switch(
-                            checked = brightnessGestureEnabled,
-                            onCheckedChange = { viewModel.setBrightnessGestureEnabled(it) },
-                            modifier = Modifier.padding(top = 2.dp).testTag("brightness_gesture_switch")
-                        )
                     }
 
-                    if (brightnessGestureEnabled) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                        Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
 
-                        // Sub-option: Brightness Sensitivity
+                    // Item 4: Zoom Gesture Settings
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.Top
                         ) {
-                            Text(
-                                text = "Brightness Sensitivity",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "%.4f".format(brightnessSensitivity),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("gestures_brightness_sensitivity_value")
-                            )
-                        }
-                        Slider(
-                            value = brightnessSensitivity,
-                            onValueChange = { viewModel.setBrightnessSensitivity(it) },
-                            valueRange = 0.0005f..0.0050f,
-                            steps = 44,
-                            modifier = Modifier.testTag("gestures_brightness_sensitivity_slider")
-                        )
-                    }
-                }
-            }
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ZoomIn,
+                                    contentDescription = "Zoom Gesture Icon",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.width(16.dp))
 
-            // Card 4: Zoom Gesture Settings
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 2.dp)
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ZoomIn,
-                                contentDescription = "Zoom Gesture Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Pinch to Zoom",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Pinch with two fingers to zoom in/out of the video",
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Switch(
+                                checked = zoomGestureEnabled,
+                                onCheckedChange = { viewModel.setZoomGestureEnabled(it) },
+                                modifier = Modifier.padding(top = 2.dp).testTag("zoom_gesture_switch")
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        if (zoomGestureEnabled) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            Spacer(modifier = Modifier.height(16.dp))
 
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Pinch to Zoom",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Pinch with two fingers to zoom in/out of the video",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Switch(
-                            checked = zoomGestureEnabled,
-                            onCheckedChange = { viewModel.setZoomGestureEnabled(it) },
-                            modifier = Modifier.padding(top = 2.dp).testTag("zoom_gesture_switch")
-                        )
-                    }
-
-                    if (zoomGestureEnabled) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        // Sub-option: Zoom Sensitivity
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Zoom Sensitivity",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "%.1fx".format(zoomSensitivity),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("gestures_zoom_sensitivity_value")
+                            // Sub-option: Zoom Sensitivity
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Zoom Sensitivity",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "%.1fx".format(zoomSensitivity),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("gestures_zoom_sensitivity_value")
+                                )
+                            }
+                            Slider(
+                                value = zoomSensitivity,
+                                onValueChange = { viewModel.setZoomSensitivity(it) },
+                                valueRange = 0.5f..2.0f,
+                                steps = 14,
+                                modifier = Modifier.testTag("gestures_zoom_sensitivity_slider")
                             )
                         }
-                        Slider(
-                            value = zoomSensitivity,
-                            onValueChange = { viewModel.setZoomSensitivity(it) },
-                            valueRange = 0.5f..2.0f,
-                            steps = 14,
-                            modifier = Modifier.testTag("gestures_zoom_sensitivity_slider")
-                        )
                     }
                 }
             }
             
             Spacer(modifier = Modifier.height(32.dp))
         }
+    }
+
+    if (includeTopBar) {
+        Scaffold(
+            topBar = {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 4.dp
+                ) {
+                    TopAppBar(
+                        title = {
+                            Text(
+                                text = "Gestures",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 20.sp
+                            )
+                        },
+                        navigationIcon = {
+                            IconButton(
+                                onClick = onBack,
+                                modifier = Modifier.testTag("gestures_settings_back_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ArrowBack,
+                                    contentDescription = "Back"
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            titleContentColor = MaterialTheme.colorScheme.onBackground,
+                            navigationIconContentColor = MaterialTheme.colorScheme.onBackground
+                        )
+                    )
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.background
+        ) { innerPadding ->
+            bodyContent(innerPadding)
+        }
+    } else {
+        bodyContent(PaddingValues(0.dp))
     }
 }
