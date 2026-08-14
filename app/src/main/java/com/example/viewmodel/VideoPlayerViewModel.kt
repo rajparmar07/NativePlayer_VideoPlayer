@@ -14,10 +14,10 @@ enum class AppTheme {
 }
 
 enum class AppFontSize(val scaleFactor: Float, val label: String) {
-    Small(0.78f, "Small (78%)"),
-    Normal(0.88f, "Normal (88%)"),
-    Large(1.00f, "Large (100%)"),
-    ExtraLarge(1.15f, "Extra Large (115%)")
+    Small(0.70f, "Small (70%)"),
+    Medium(0.85f, "Medium (85%)"),
+    Regular(1.00f, "Regular (100%)"),
+    Large(1.15f, "Large (115%)")
 }
 
 enum class AppThemePalette(val title: String, val subtitle: String, val isLightPalette: Boolean) {
@@ -73,6 +73,11 @@ enum class VideoTileInfo(val label: String, val description: String) {
     ADVANCED("Advanced", "Essential + Video type, Resolution and Seek position")
 }
 
+enum class LongPressMode(val label: String, val description: String) {
+    WHOLE_SCREEN("Whole Screen", "Long press anywhere on whole screen to play at selected speed"),
+    SPLIT_SCREEN("Split Screen (Left / Right)", "Long press right side to forward, left side to backward at selected speed")
+}
+
 data class DisplaySettings(
     val displayMode: ListDisplayMode = ListDisplayMode.FOLDERS,
     val listStyle: ListStyle = ListStyle.LIST,
@@ -100,7 +105,16 @@ class VideoPlayerViewModel(
     }
 
     private val _appFontSize = MutableStateFlow(
-        runCatching { AppFontSize.valueOf(prefs.getString("app_font_size", AppFontSize.Normal.name) ?: AppFontSize.Normal.name) }.getOrDefault(AppFontSize.Normal)
+        runCatching {
+            val savedName = prefs.getString("app_font_size", AppFontSize.Regular.name) ?: AppFontSize.Regular.name
+            runCatching { AppFontSize.valueOf(savedName) }.getOrElse {
+                when (savedName) {
+                    "Normal" -> AppFontSize.Medium
+                    "ExtraLarge" -> AppFontSize.Large
+                    else -> AppFontSize.Regular
+                }
+            }
+        }.getOrDefault(AppFontSize.Regular)
     )
     val appFontSize: StateFlow<AppFontSize> = _appFontSize.asStateFlow()
 
@@ -693,6 +707,63 @@ data class VideoPlaybackState(
         val bounded = sensitivity.coerceIn(0.5f, 2.0f)
         _zoomSensitivity.value = bounded
         prefs.edit().putFloat("zoom_sensitivity", bounded).apply()
+    }
+
+    // Long press to play at nx speed gesture settings
+    private val _longPressSpeedEnabled = MutableStateFlow(
+        prefs.getBoolean("long_press_speed_enabled", true)
+    )
+    val longPressSpeedEnabled: StateFlow<Boolean> = _longPressSpeedEnabled.asStateFlow()
+
+    fun setLongPressSpeedEnabled(enabled: Boolean) {
+        _longPressSpeedEnabled.value = enabled
+        prefs.edit().putBoolean("long_press_speed_enabled", enabled).apply()
+    }
+
+    private val _longPressMode = MutableStateFlow(
+        runCatching {
+            val saved = prefs.getString("long_press_mode", LongPressMode.WHOLE_SCREEN.name) ?: LongPressMode.WHOLE_SCREEN.name
+            LongPressMode.valueOf(saved)
+        }.getOrDefault(LongPressMode.WHOLE_SCREEN)
+    )
+    val longPressMode: StateFlow<LongPressMode> = _longPressMode.asStateFlow()
+
+    fun setLongPressMode(mode: LongPressMode) {
+        _longPressMode.value = mode
+        prefs.edit().putString("long_press_mode", mode.name).apply()
+    }
+
+    private val _longPressWholeScreenSpeed = MutableStateFlow(
+        prefs.getFloat("long_press_whole_speed", 2.0f).coerceIn(0.25f, 4.0f)
+    )
+    val longPressWholeScreenSpeed: StateFlow<Float> = _longPressWholeScreenSpeed.asStateFlow()
+
+    fun setLongPressWholeScreenSpeed(speed: Float) {
+        val bounded = (Math.round(speed.coerceIn(0.25f, 4.0f) * 100f) / 100f)
+        _longPressWholeScreenSpeed.value = bounded
+        prefs.edit().putFloat("long_press_whole_speed", bounded).apply()
+    }
+
+    private val _longPressLeftSpeed = MutableStateFlow(
+        prefs.getFloat("long_press_left_speed", 2.0f).coerceIn(0.25f, 4.0f)
+    )
+    val longPressLeftSpeed: StateFlow<Float> = _longPressLeftSpeed.asStateFlow()
+
+    fun setLongPressLeftSpeed(speed: Float) {
+        val bounded = (Math.round(speed.coerceIn(0.25f, 4.0f) * 100f) / 100f)
+        _longPressLeftSpeed.value = bounded
+        prefs.edit().putFloat("long_press_left_speed", bounded).apply()
+    }
+
+    private val _longPressRightSpeed = MutableStateFlow(
+        prefs.getFloat("long_press_right_speed", 2.0f).coerceIn(0.25f, 4.0f)
+    )
+    val longPressRightSpeed: StateFlow<Float> = _longPressRightSpeed.asStateFlow()
+
+    fun setLongPressRightSpeed(speed: Float) {
+        val bounded = (Math.round(speed.coerceIn(0.25f, 4.0f) * 100f) / 100f)
+        _longPressRightSpeed.value = bounded
+        prefs.edit().putFloat("long_press_right_speed", bounded).apply()
     }
 
     // Observe Room Database entities

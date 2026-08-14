@@ -308,7 +308,7 @@ fun buildColorScheme(
 fun MyApplicationTheme(
     appTheme: AppTheme = AppTheme.System,
     appPalette: AppThemePalette = AppThemePalette.OceanSlate,
-    appFontSize: AppFontSize = AppFontSize.Normal,
+    appFontSize: AppFontSize = AppFontSize.Regular,
     isHighContrastDark: Boolean = false,
     content: @Composable () -> Unit,
 ) {

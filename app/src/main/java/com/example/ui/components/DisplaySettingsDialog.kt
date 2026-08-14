@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -238,14 +239,18 @@ fun DisplaySettingsDialog(
                                                 shape = RoundedCornerShape(10.dp)
                                             ) {
                                                 Box(
-                                                    modifier = Modifier.padding(vertical = 8.dp),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 4.dp, vertical = 10.dp),
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     Text(
                                                         text = "${colOption.count} Cols",
                                                         fontSize = 12.sp,
                                                         fontWeight = if (isColSelected) FontWeight.Bold else FontWeight.Normal,
-                                                        color = if (isColSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                        color = if (isColSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                                        textAlign = TextAlign.Center,
+                                                        maxLines = 1
                                                     )
                                                 }
                                             }
@@ -286,14 +291,18 @@ fun DisplaySettingsDialog(
                                         shape = RoundedCornerShape(10.dp)
                                     ) {
                                         Box(
-                                            modifier = Modifier.padding(vertical = 8.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 4.dp, vertical = 10.dp),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Text(
                                                 text = field.label,
                                                 fontSize = 11.sp,
                                                 fontWeight = if (isFieldSelected) FontWeight.Bold else FontWeight.Medium,
-                                                color = if (isFieldSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                color = if (isFieldSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                                textAlign = TextAlign.Center,
+                                                maxLines = 1
                                             )
                                         }
                                     }
@@ -324,7 +333,9 @@ fun DisplaySettingsDialog(
                                         shape = RoundedCornerShape(10.dp)
                                     ) {
                                         Row(
-                                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 12.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 6.dp, vertical = 10.dp),
                                             horizontalArrangement = Arrangement.Center,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
@@ -334,12 +345,14 @@ fun DisplaySettingsDialog(
                                                 tint = if (isDirSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                                 modifier = Modifier.size(16.dp)
                                             )
-                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
                                             Text(
                                                 text = dir.label,
                                                 fontSize = 12.sp,
                                                 fontWeight = if (isDirSelected) FontWeight.Bold else FontWeight.Medium,
-                                                color = if (isDirSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                color = if (isDirSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                                textAlign = TextAlign.Center,
+                                                maxLines = 1
                                             )
                                         }
                                     }

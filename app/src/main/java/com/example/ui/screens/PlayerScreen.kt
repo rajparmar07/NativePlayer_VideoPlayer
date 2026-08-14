@@ -84,6 +84,8 @@ import com.example.viewmodel.VideoPlayerViewModel
 import com.example.viewmodel.SubtitleStyle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import androidx.compose.foundation.gestures.awaitFirstDown
 import kotlin.math.abs
 import kotlin.math.sqrt
 import androidx.compose.ui.graphics.graphicsLayer
@@ -98,6 +100,7 @@ private const val GESTURE_HUD_HIDE_DELAY = 800L   // ms before HUD fades after d
 
 /** Gesture zones active during video playback. Locked in at drag-start, never changes mid-gesture. */
 private enum class GestureType { BRIGHTNESS, VOLUME, SEEK }
+private enum class LongPressDirection { FORWARD, BACKWARD }
 
 data class SubtitleTrackInfo(
     val groupIndex: Int,
@@ -480,6 +483,19 @@ fun PlayerScreen(
     val brightnessSensitivitySetting by viewModel.brightnessSensitivity.collectAsState()
     val zoomGestureEnabled by viewModel.zoomGestureEnabled.collectAsState()
     val zoomSensitivity by viewModel.zoomSensitivity.collectAsState()
+
+    val longPressSpeedEnabled by viewModel.longPressSpeedEnabled.collectAsState()
+    val longPressMode by viewModel.longPressMode.collectAsState()
+    val longPressWholeScreenSpeed by viewModel.longPressWholeScreenSpeed.collectAsState()
+    val longPressLeftSpeed by viewModel.longPressLeftSpeed.collectAsState()
+    val longPressRightSpeed by viewModel.longPressRightSpeed.collectAsState()
+
+    var isLongPressActive by remember { mutableStateOf(false) }
+    var longPressDirection by remember { mutableStateOf<LongPressDirection?>(null) }
+    var longPressSpeed by remember { mutableFloatStateOf(1.0f) }
+    var speedBeforeLongPress by remember { mutableFloatStateOf(1.0f) }
+    var volumeBeforeLongPress by remember { mutableFloatStateOf(1.0f) }
+    var wasPlayingBeforeLongPress by remember { mutableStateOf(false) }
     val audioManager = remember {
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
@@ -646,6 +662,24 @@ fun PlayerScreen(
         if (showControls) {
             delay(controllerTimeout * 1000L)
             showControls = false
+        }
+    }
+
+    // Chunked Seek-and-Play Trickplay Rewind logic during BACKWARD long press
+    LaunchedEffect(isLongPressActive, longPressDirection, longPressSpeed) {
+        if (isLongPressActive && longPressDirection == LongPressDirection.BACKWARD) {
+            val burstMs = 80L
+            val stepMs = (320L * longPressSpeed).toLong().coerceAtLeast(150L)
+            var anchorPos = currentPos
+            while (isLongPressActive) {
+                anchorPos = (anchorPos - stepMs).coerceAtLeast(0L)
+                currentPos = anchorPos
+                exoPlayer.seekTo(anchorPos)
+                if (!exoPlayer.isPlaying) {
+                    exoPlayer.play()
+                }
+                delay(burstMs)
+            }
         }
     }
 
@@ -1085,6 +1119,95 @@ fun PlayerScreen(
                         }
                         if (event.changes.none { it.pressed }) {
                             lastDistance = -1f
+                        }
+                    }
+                }
+            }
+            // ── Long Press Speed Gesture detector ────────────────────────────────
+            .pointerInput(
+                isLocked, isInPipMode, isPendingPostSwipe, longPressSpeedEnabled, longPressMode,
+                longPressWholeScreenSpeed, longPressLeftSpeed, longPressRightSpeed, exoPlayer
+            ) {
+                if (isInPipMode || isLocked || isPendingPostSwipe || !longPressSpeedEnabled) return@pointerInput
+                awaitPointerEventScope {
+                    while (true) {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downX = down.position.x
+                        val downY = down.position.y
+                        val screenWidth = size.width.toFloat()
+                        val downTime = System.currentTimeMillis()
+                        val longPressThresholdMs = 300L
+
+                        var pointerReleased = false
+                        var pointerMovedFar = false
+                        var triggeredLongPress = false
+
+                        while (!pointerReleased && !pointerMovedFar) {
+                            val event = withTimeoutOrNull(40L) { awaitPointerEvent() }
+                            if (event != null) {
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change != null) {
+                                    if (!change.pressed) {
+                                        pointerReleased = true
+                                    } else {
+                                        val dist = kotlin.math.sqrt(
+                                            (change.position.x - downX) * (change.position.x - downX) +
+                                            (change.position.y - downY) * (change.position.y - downY)
+                                        )
+                                        if (dist > 24f) {
+                                            pointerMovedFar = true
+                                        }
+                                    }
+                                } else {
+                                    pointerReleased = true
+                                }
+                            }
+
+                            if (!pointerReleased && !pointerMovedFar && !triggeredLongPress && (System.currentTimeMillis() - downTime) >= longPressThresholdMs) {
+                                triggeredLongPress = true
+                                val (dir, spd) = when (longPressMode) {
+                                    com.example.viewmodel.LongPressMode.WHOLE_SCREEN ->
+                                        Pair(LongPressDirection.FORWARD, longPressWholeScreenSpeed)
+                                    com.example.viewmodel.LongPressMode.SPLIT_SCREEN -> {
+                                        if (downX < screenWidth / 2f) {
+                                            Pair(LongPressDirection.BACKWARD, longPressLeftSpeed)
+                                        } else {
+                                            Pair(LongPressDirection.FORWARD, longPressRightSpeed)
+                                        }
+                                    }
+                                }
+                                wasPlayingBeforeLongPress = exoPlayer.isPlaying
+                                speedBeforeLongPress = exoPlayer.playbackParameters.speed
+                                volumeBeforeLongPress = exoPlayer.volume
+                                longPressDirection = dir
+                                longPressSpeed = spd
+                                isLongPressActive = true
+                                if (dir == LongPressDirection.FORWARD) {
+                                    exoPlayer.setPlaybackSpeed(spd)
+                                } else {
+                                    exoPlayer.volume = 0f
+                                    exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                                    if (!exoPlayer.isPlaying) {
+                                        exoPlayer.play()
+                                    }
+                                }
+                            }
+                        }
+
+                        if (triggeredLongPress) {
+                            val endedDir = longPressDirection
+                            isLongPressActive = false
+                            longPressDirection = null
+                            exoPlayer.setPlaybackSpeed(speedBeforeLongPress)
+                            if (endedDir == LongPressDirection.BACKWARD) {
+                                exoPlayer.volume = volumeBeforeLongPress
+                                exoPlayer.setSeekParameters(if (activeFastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT)
+                                if (wasPlayingBeforeLongPress) {
+                                    exoPlayer.play()
+                                } else {
+                                    exoPlayer.pause()
+                                }
+                            }
                         }
                     }
                 }
@@ -1960,7 +2083,10 @@ fun PlayerScreen(
             brightness = gestureBrightness,
             volume = gestureVolume,
             seekOffsetMs = gestureSeekOffset,
-            seekBasePos = dragStartPos
+            seekBasePos = dragStartPos,
+            isLongPressActive = isLongPressActive,
+            longPressDirection = longPressDirection,
+            longPressSpeed = longPressSpeed
         )
         // ─────────────────────────────────────────────────────────────────────
 
@@ -2808,7 +2934,10 @@ private fun GestureHudOverlay(
     brightness: Float,
     volume: Float,
     seekOffsetMs: Long,
-    seekBasePos: Long   // stable drag-start position — used for "from" timestamp
+    seekBasePos: Long,   // stable drag-start position — used for "from" timestamp
+    isLongPressActive: Boolean = false,
+    longPressDirection: LongPressDirection? = null,
+    longPressSpeed: Float = 1.0f
 ) {
     val barWidth = 24.dp
     val barHeight = 130.dp
@@ -2820,6 +2949,66 @@ private fun GestureHudOverlay(
     val tertiaryColor = MaterialTheme.colorScheme.tertiary
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
     val primaryContainerColor = MaterialTheme.colorScheme.primaryContainer
+
+    // ── Long Press Speed HUD (Top Center of Screen) ─────────────────────────
+    AnimatedVisibility(
+        visible = isLongPressActive && longPressDirection != null,
+        enter = fadeIn(animationSpec = tween(150)) + expandVertically(expandFrom = Alignment.Top),
+        exit  = fadeOut(animationSpec = tween(250)) + shrinkVertically(shrinkTowards = Alignment.Top),
+        modifier = Modifier
+            .fillMaxSize()
+            .wrapContentSize(Alignment.TopCenter)
+            .statusBarsPadding()
+            .padding(top = 16.dp)
+            .testTag("long_press_hud_overlay")
+    ) {
+        val arrow = if (longPressDirection == LongPressDirection.FORWARD) Icons.Default.FastForward else Icons.Default.FastRewind
+        val actionText = if (longPressDirection == LongPressDirection.FORWARD) "Fast Forwarding" else "Rewinding"
+
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = cardColor,
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(primaryContainerColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = arrow,
+                        contentDescription = actionText,
+                        tint = primaryColor,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = "%.2fx".format(longPressSpeed),
+                        color = onSurfaceColor,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = actionText,
+                        color = onSurfaceColor.copy(alpha = 0.75f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+    }
 
     // ── Brightness HUD (Swapped to RIGHT-CENTER: user swipes left side of screen) ──
     AnimatedVisibility(

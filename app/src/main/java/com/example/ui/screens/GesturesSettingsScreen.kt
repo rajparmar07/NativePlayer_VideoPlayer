@@ -9,6 +9,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Brightness5
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.*
@@ -39,6 +41,12 @@ fun GesturesSettingsScreen(
     val volumeSwipePixels by viewModel.volumeSwipePixels.collectAsState()
     val brightnessSensitivity by viewModel.brightnessSensitivity.collectAsState()
     val zoomSensitivity by viewModel.zoomSensitivity.collectAsState()
+
+    val longPressSpeedEnabled by viewModel.longPressSpeedEnabled.collectAsState()
+    val longPressMode by viewModel.longPressMode.collectAsState()
+    val longPressWholeScreenSpeed by viewModel.longPressWholeScreenSpeed.collectAsState()
+    val longPressLeftSpeed by viewModel.longPressLeftSpeed.collectAsState()
+    val longPressRightSpeed by viewModel.longPressRightSpeed.collectAsState()
 
     val bodyContent: @Composable (PaddingValues) -> Unit = { innerPadding ->
         Column(
@@ -428,6 +436,234 @@ fun GesturesSettingsScreen(
                                 steps = 14,
                                 modifier = Modifier.testTag("gestures_zoom_sensitivity_slider")
                             )
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
+
+                    // Item 5: Long press to play at nx speed
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Speed,
+                                    contentDescription = "Long Press Speed Gesture Icon",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(16.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Long press to play at nx speed",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Press and hold on player screen to adjust playback speed or fast forward/rewind",
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Switch(
+                                checked = longPressSpeedEnabled,
+                                onCheckedChange = { viewModel.setLongPressSpeedEnabled(it) },
+                                modifier = Modifier.padding(top = 2.dp).testTag("long_press_gesture_switch")
+                            )
+                        }
+
+                        if (longPressSpeedEnabled) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Text(
+                                text = "Gesture Mode & Screen Categorization",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Select touch area behavior when holding down on the player screen",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Mode Selection Cards (Whole Screen vs Split Screen)
+                            com.example.viewmodel.LongPressMode.values().forEach { mode ->
+                                val isSelected = longPressMode == mode
+                                Card(
+                                    onClick = { viewModel.setLongPressMode(mode) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .testTag(if (mode == com.example.viewmodel.LongPressMode.WHOLE_SCREEN) "long_press_mode_whole" else "long_press_mode_split"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                    ),
+                                    border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        RadioButton(
+                                            selected = isSelected,
+                                            onClick = { viewModel.setLongPressMode(mode) }
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
+                                            Text(
+                                                text = mode.label,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = mode.description,
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // Speed Sliders (Range 0.25x to 4.0x)
+                            if (longPressMode == com.example.viewmodel.LongPressMode.WHOLE_SCREEN) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Whole Screen Speed",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "%.2fx".format(longPressWholeScreenSpeed),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.testTag("long_press_whole_speed_value")
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Playback speed when long pressing anywhere on screen (0.25x to 4.0x)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Slider(
+                                    value = longPressWholeScreenSpeed,
+                                    onValueChange = { viewModel.setLongPressWholeScreenSpeed(it) },
+                                    valueRange = 0.25f..4.0f,
+                                    steps = 14,
+                                    modifier = Modifier.testTag("long_press_whole_speed_slider")
+                                )
+                            } else {
+                                // Split Screen Mode (Left & Right speed sliders)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Left Side Speed (Rewind ⏪)",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "%.2fx".format(longPressLeftSpeed),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.testTag("long_press_left_speed_value")
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Backward speed when long pressing on left half of screen (0.25x to 4.0x)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Slider(
+                                    value = longPressLeftSpeed,
+                                    onValueChange = { viewModel.setLongPressLeftSpeed(it) },
+                                    valueRange = 0.25f..4.0f,
+                                    steps = 14,
+                                    modifier = Modifier.testTag("long_press_left_speed_slider")
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Right Side Speed (Fast Forward ⏩)",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "%.2fx".format(longPressRightSpeed),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.testTag("long_press_right_speed_value")
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Forward speed when long pressing on right half of screen (0.25x to 4.0x)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Slider(
+                                    value = longPressRightSpeed,
+                                    onValueChange = { viewModel.setLongPressRightSpeed(it) },
+                                    valueRange = 0.25f..4.0f,
+                                    steps = 14,
+                                    modifier = Modifier.testTag("long_press_right_speed_slider")
+                                )
+                            }
                         }
                     }
                 }

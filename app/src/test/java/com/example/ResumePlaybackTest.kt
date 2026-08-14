@@ -154,6 +154,36 @@ class ResumePlaybackTest {
         assertEquals(0.5f, viewModel.zoomSensitivity.value)
         viewModel.setZoomSensitivity(3.0f) // above max (2.0f)
         assertEquals(2.0f, viewModel.zoomSensitivity.value)
+
+        // Test long press speed gesture settings
+        assertTrue(viewModel.longPressSpeedEnabled.value)
+        assertEquals(com.example.viewmodel.LongPressMode.WHOLE_SCREEN, viewModel.longPressMode.value)
+        assertEquals(2.0f, viewModel.longPressWholeScreenSpeed.value, 0.01f)
+        assertEquals(2.0f, viewModel.longPressLeftSpeed.value, 0.01f)
+        assertEquals(2.0f, viewModel.longPressRightSpeed.value, 0.01f)
+
+        viewModel.setLongPressSpeedEnabled(false)
+        assertFalse(viewModel.longPressSpeedEnabled.value)
+
+        viewModel.setLongPressMode(com.example.viewmodel.LongPressMode.SPLIT_SCREEN)
+        assertEquals(com.example.viewmodel.LongPressMode.SPLIT_SCREEN, viewModel.longPressMode.value)
+
+        viewModel.setLongPressWholeScreenSpeed(3.5f)
+        assertEquals(3.5f, viewModel.longPressWholeScreenSpeed.value, 0.01f)
+        viewModel.setLongPressWholeScreenSpeed(0.1f) // below min (0.25f)
+        assertEquals(0.25f, viewModel.longPressWholeScreenSpeed.value, 0.01f)
+        viewModel.setLongPressWholeScreenSpeed(5.0f) // above max (4.0f)
+        assertEquals(4.0f, viewModel.longPressWholeScreenSpeed.value, 0.01f)
+
+        viewModel.setLongPressLeftSpeed(1.5f)
+        assertEquals(1.5f, viewModel.longPressLeftSpeed.value, 0.01f)
+        viewModel.setLongPressLeftSpeed(0.1f) // below min (0.25f)
+        assertEquals(0.25f, viewModel.longPressLeftSpeed.value, 0.01f)
+
+        viewModel.setLongPressRightSpeed(2.5f)
+        assertEquals(2.5f, viewModel.longPressRightSpeed.value, 0.01f)
+        viewModel.setLongPressRightSpeed(6.0f) // above max (4.0f)
+        assertEquals(4.0f, viewModel.longPressRightSpeed.value, 0.01f)
     }
 
     @Test

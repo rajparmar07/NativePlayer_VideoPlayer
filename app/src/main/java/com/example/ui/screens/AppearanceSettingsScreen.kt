@@ -406,6 +406,11 @@ fun AppearanceSettingsScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
+                                    .border(
+                                        width = if (isSelected) 2.dp else 1.dp,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
                                     .clickable { viewModel.setAppTheme(themeOption) }
                                     .testTag("theme_mode_option_${themeOption.name.lowercase()}"),
                                 color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
@@ -414,19 +419,19 @@ fun AppearanceSettingsScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        .padding(horizontal = 14.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
                                         imageVector = icon,
                                         contentDescription = null,
                                         tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(22.dp)
+                                        modifier = Modifier.size(20.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(14.dp))
+                                    Spacer(modifier = Modifier.width(12.dp))
                                     Text(
                                         text = label,
-                                        fontSize = 15.sp,
+                                        fontSize = 14.sp,
                                         fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                                         color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                                         modifier = Modifier.weight(1f)
@@ -491,32 +496,32 @@ fun AppearanceSettingsScreen(
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                                .padding(horizontal = 14.dp, vertical = 6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Row(
                                                 modifier = Modifier
                                                     .clip(RoundedCornerShape(20.dp))
                                                     .background(bgPreview)
-                                                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                                                    .padding(horizontal = 5.dp, vertical = 4.dp),
                                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(16.dp)
+                                                        .size(14.dp)
                                                         .clip(CircleShape)
                                                         .background(pColor)
                                                 )
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(16.dp)
+                                                        .size(14.dp)
                                                         .clip(CircleShape)
                                                         .background(sColor)
                                                 )
                                             }
 
-                                            Spacer(modifier = Modifier.width(14.dp))
+                                            Spacer(modifier = Modifier.width(12.dp))
 
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
@@ -649,13 +654,13 @@ fun AppearanceSettingsScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
                                         text = fontSizeOption.label,
-                                        fontSize = 15.sp,
+                                        fontSize = 14.sp,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                                         color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                                     )
