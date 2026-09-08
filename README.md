@@ -1,12 +1,9 @@
 <div align="center">
 
-  <img src="app/src/main/res/drawable/ic_launcher_foreground.png" alt="Native Player Logo" width="120" height="120" />
+  <img src="assets/banner.png" alt="Native Player Banner" width="100%" />
 
-  # Native Player (StreamCache)
-  
-  **Your videos, played natively.**
-  
-  *A modern, feature-rich, high-performance Android native video player built with 100% Kotlin, Jetpack Compose, and AndroidX Media3 ExoPlayer.*
+  <br />
+  <br />
 
   <p align="center">
     <a href="https://github.com/rajparmar07/StreamCache_VideoPlayer/releases"><img src="https://img.shields.io/github/v/release/rajparmar07/StreamCache_VideoPlayer?style=for-the-badge&logo=github&color=3533CD" alt="Latest Release" /></a>
