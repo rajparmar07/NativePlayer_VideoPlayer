@@ -8,13 +8,13 @@ plugins {
 }
 
 android {
-  namespace = "com.example"
+  namespace = "com.nativeplayer"
 
   // FIXED: Reverted to standard stable syntax compatible with Gradle 8.6
   compileSdk = 35
 
   defaultConfig {
-    applicationId = "com.aistudio.videoplayer.gjpqrw"
+    applicationId = "com.nativeplayer"
     minSdk = 24
 
     // FIXED: Adjusted to match stable toolchain limits for AGP 8.4
@@ -100,6 +100,7 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
+  implementation(libs.coil.gif)
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
   implementation(libs.androidx.media3.exoplayer.hls)

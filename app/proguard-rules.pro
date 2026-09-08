@@ -52,8 +52,8 @@
 
 # ── App data / model classes ──────────────────────────────────────────────────
 # Room entities and DAOs must survive shrinking intact
--keep class com.example.data.** { *; }
--keep class com.example.viewmodel.** { *; }
+-keep class com.nativeplayer.data.** { *; }
+-keep class com.nativeplayer.viewmodel.** { *; }
 
 # ── Kotlin reflection (used by Moshi codegen) ────────────────────────────────
 -keep class kotlin.Metadata { *; }
