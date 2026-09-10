@@ -55,7 +55,7 @@ fun AboutScreen(
     val githubUrl = "https://github.com/rajparmar07/StreamCache_VideoPlayer"
     val authorUrl = "https://github.com/rajparmar07"
     val donateUrl = "https://buymeacoffee.com/rajparmar07"
-    val privacyPolicyUrl = "https://github.com/rajparmar07/StreamCache_VideoPlayer/blob/main/PRIVACY.md"
+    val privacyPolicyUrl = "https://github.com/rajparmar07/StreamCache_VideoPlayer/blob/master/PRIVACY.md"
 
     val bodyContent: @Composable (PaddingValues) -> Unit = { innerPadding ->
         Column(
