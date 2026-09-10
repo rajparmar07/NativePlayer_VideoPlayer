@@ -8,19 +8,19 @@ plugins {
 }
 
 android {
-  namespace = "com.nativeplayer"
+  namespace = "com.nativeplayer.videoplayer"
 
   // FIXED: Reverted to standard stable syntax compatible with Gradle 8.6
   compileSdk = 35
 
   defaultConfig {
-    applicationId = "com.nativeplayer"
+    applicationId = "com.nativeplayer.videoplayer"
     minSdk = 24
 
     // FIXED: Adjusted to match stable toolchain limits for AGP 8.4
     targetSdk = 34
     versionCode = 1
-    versionName = "1.0"
+    versionName = "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -71,6 +71,14 @@ android {
   testOptions { unitTests { isIncludeAndroidResources = true } }
   kotlinOptions {
     jvmTarget = "11"
+  }
+
+  applicationVariants.all {
+    val variant = this
+    outputs.all {
+      val output = this as? com.android.build.gradle.api.ApkVariantOutput
+      output?.outputFileName = "native_player_v${variant.versionName}.apk"
+    }
   }
 }
 

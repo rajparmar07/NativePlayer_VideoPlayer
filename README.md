@@ -12,6 +12,7 @@
     <a href="https://developer.android.com/media/media3"><img src="https://img.shields.io/badge/Engine-AndroidX%20Media3-00C853?style=for-the-badge&logo=android&logoColor=white" alt="Media3 ExoPlayer" /></a>
     <a href="https://buymeacoffee.com/rajparmar07"><img src="https://img.shields.io/badge/Donate-Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me A Coffee" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge" alt="License" /></a>
+    <a href="PRIVACY.md"><img src="https://img.shields.io/badge/Privacy-Policy-success?style=for-the-badge" alt="Privacy Policy" /></a>
   </p>
 
   <p align="center">
@@ -21,6 +22,7 @@
     <a href="#-gestures--controls">Gestures</a> •
     <a href="#-tech-stack">Tech Stack</a> •
     <a href="#-building-from-source">Building</a> •
+    <a href="PRIVACY.md">Privacy Policy</a> •
     <a href="#-support--donate">Support</a>
   </p>
 
