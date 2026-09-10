@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.screens
+package com.nativeplayer.videoplayer.ui.screens
 
 import android.content.Context
 import android.content.Intent
@@ -151,30 +151,12 @@ object OpenSourceLibrariesData {
             category = "UI & Compose"
         ),
         OpenSourceLibrary(
-            name = "Square Retrofit",
-            artifact = "com.squareup.retrofit2:retrofit",
-            version = "2.12.0",
-            license = "Apache 2.0",
-            description = "Type-safe HTTP client for Android and Kotlin.",
-            url = "https://github.com/square/retrofit",
-            category = "Networking"
-        ),
-        OpenSourceLibrary(
-            name = "Square OkHttp & Logging Interceptor",
+            name = "Square OkHttp",
             artifact = "com.squareup.okhttp3:okhttp",
             version = "4.10.0",
             license = "Apache 2.0",
             description = "Fast, reliable HTTP/2 client for Android network communications.",
             url = "https://github.com/square/okhttp",
-            category = "Networking"
-        ),
-        OpenSourceLibrary(
-            name = "Square Moshi Kotlin",
-            artifact = "com.squareup.moshi:moshi-kotlin",
-            version = "1.15.2",
-            license = "Apache 2.0",
-            description = "Modern JSON parsing library for Kotlin and Android.",
-            url = "https://github.com/square/moshi",
             category = "Networking"
         ),
         OpenSourceLibrary(
