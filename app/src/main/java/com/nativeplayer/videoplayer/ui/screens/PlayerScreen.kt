@@ -1,4 +1,4 @@
-﻿@file:kotlin.OptIn(
+@file:kotlin.OptIn(
     androidx.media3.common.util.UnstableApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class
 )
@@ -289,16 +289,6 @@ fun PlayerScreen(
     // Initialize ExoPlayer (recreated when hardwareAccel changes to reload rendering pipeline)
     val exoPlayer = remember(hardwareAccel) {
         val renderersFactory = object : DefaultRenderersFactory(context) {
-            override fun buildAudioSink(
-                context: android.content.Context,
-                enableFloatOutput: Boolean,
-                enableAudioTrackPlaybackParams: Boolean
-            ): androidx.media3.exoplayer.audio.AudioSink? {
-                val sanitizer = ChannelMaskSanitizerAudioProcessor()
-                return androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context)
-                    .setAudioProcessors(arrayOf(sanitizer))
-                    .build()
-            }
 
             override fun buildTextRenderers(
                 context: android.content.Context,
@@ -661,7 +651,7 @@ fun PlayerScreen(
     // Periodically update progress from ExoPlayer
     LaunchedEffect(exoPlayer) {
         while (true) {
-            if (!isGestureSeeking && !isSliderDragging) {
+            if (!isGestureSeeking && !isSliderDragging && !isLongPressActive) {
                 currentPos = exoPlayer.currentPosition
                 duration = exoPlayer.duration.coerceAtLeast(0L)
                 bufferPos = exoPlayer.bufferedPosition
@@ -692,8 +682,8 @@ fun PlayerScreen(
     }
 
     val saveCurrentProgress = {
-        val currentPosition = exoPlayer.currentPosition
         val totalDuration = exoPlayer.duration
+        val currentPosition = if (totalDuration > 0) exoPlayer.currentPosition.coerceIn(0L, totalDuration) else exoPlayer.currentPosition.coerceAtLeast(0L)
         if (totalDuration > 0) {
             viewModel.saveVideoProgress(
                 urlOrPath = video.urlOrPath,
@@ -738,15 +728,31 @@ fun PlayerScreen(
     // Chunked Seek-and-Play Trickplay Rewind logic during BACKWARD long press
     LaunchedEffect(isLongPressActive, longPressDirection, longPressSpeed) {
         if (isLongPressActive && longPressDirection == LongPressDirection.BACKWARD) {
-            val burstMs = 80L
-            val stepMs = (320L * longPressSpeed).toLong().coerceAtLeast(150L)
+            val burstMs = 120L
+            val stepMs = (600L * longPressSpeed).toLong().coerceAtLeast(300L)
             var anchorPos = currentPos
             while (isLongPressActive) {
+                if (!exoPlayer.isCurrentMediaItemSeekable || exoPlayer.currentTimeline.isEmpty) {
+                    delay(burstMs)
+                    continue
+                }
                 anchorPos = (anchorPos - stepMs).coerceAtLeast(0L)
                 currentPos = anchorPos
-                exoPlayer.seekTo(anchorPos)
-                if (!exoPlayer.isPlaying) {
-                    exoPlayer.play()
+                try {
+                    exoPlayer.seekTo(anchorPos)
+                    if (!exoPlayer.isPlaying) {
+                        exoPlayer.play()
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("PlayerScreen", "Seek error in backward long press: ${e.message}")
+                    break
+                }
+                if (anchorPos <= 0L) {
+                    // Reached the beginning: avoid repetitive seekTo(0L) storm on decoder buffers
+                    while (isLongPressActive) {
+                        delay(100L)
+                    }
+                    break
                 }
                 delay(burstMs)
             }
@@ -930,6 +936,17 @@ fun PlayerScreen(
                     }
                     Player.STATE_ENDED -> {
                         isLoading = false
+                        if (isLongPressActive) {
+                            val endedDir = longPressDirection
+                            isLongPressActive = false
+                            longPressDirection = null
+                            try {
+                                exoPlayer.setPlaybackSpeed(speedBeforeLongPress)
+                                if (endedDir == LongPressDirection.BACKWARD) {
+                                    exoPlayer.volume = volumeBeforeLongPress
+                                }
+                            } catch (_: Exception) {}
+                        }
                         saveCurrentProgress()
                         viewModel.playNext()
                     }
@@ -1321,15 +1338,19 @@ fun PlayerScreen(
                             val endedDir = longPressDirection
                             isLongPressActive = false
                             longPressDirection = null
-                            exoPlayer.setPlaybackSpeed(speedBeforeLongPress)
-                            if (endedDir == LongPressDirection.BACKWARD) {
-                                exoPlayer.volume = volumeBeforeLongPress
-                                exoPlayer.setSeekParameters(if (activeFastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT)
-                                if (wasPlayingBeforeLongPress) {
-                                    exoPlayer.play()
-                                } else {
-                                    exoPlayer.pause()
+                            try {
+                                exoPlayer.setPlaybackSpeed(speedBeforeLongPress)
+                                if (endedDir == LongPressDirection.BACKWARD) {
+                                    exoPlayer.volume = volumeBeforeLongPress
+                                    exoPlayer.setSeekParameters(if (activeFastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters.DEFAULT)
+                                    if (wasPlayingBeforeLongPress) {
+                                        exoPlayer.play()
+                                    } else {
+                                        exoPlayer.pause()
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                Log.e("PlayerScreen", "Error restoring speed after long press: ${e.message}")
                             }
                         }
                     }
@@ -3670,61 +3691,4 @@ private class CustomMediaSourceFactory(
     }
 }
 
-@androidx.media3.common.util.UnstableApi
-private class ChannelMaskSanitizerAudioProcessor : androidx.media3.common.audio.AudioProcessor {
-    private var pendingOutputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
-    private var outputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
-    private var buffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
-    private var outputBuffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
-    private var inputEnded = false
 
-    override fun configure(inputAudioFormat: androidx.media3.common.audio.AudioProcessor.AudioFormat): androidx.media3.common.audio.AudioProcessor.AudioFormat {
-        pendingOutputFormat = inputAudioFormat
-        return pendingOutputFormat
-    }
-
-    override fun isActive(): Boolean {
-        return pendingOutputFormat != androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
-    }
-
-    override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
-        val remaining = inputBuffer.remaining()
-        if (remaining == 0) {
-            return
-        }
-        if (buffer.capacity() < remaining) {
-            buffer = java.nio.ByteBuffer.allocateDirect(remaining).order(java.nio.ByteOrder.nativeOrder())
-        } else {
-            buffer.clear()
-        }
-        buffer.put(inputBuffer)
-        buffer.flip()
-        outputBuffer = buffer
-    }
-
-    override fun queueEndOfStream() {
-        inputEnded = true
-    }
-
-    override fun getOutput(): java.nio.ByteBuffer {
-        val output = outputBuffer
-        outputBuffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
-        return output
-    }
-
-    override fun isEnded(): Boolean {
-        return inputEnded && outputBuffer === androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
-    }
-
-    override fun flush() {
-        outputBuffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
-        inputEnded = false
-    }
-
-    override fun reset() {
-        flush()
-        buffer = androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER
-        pendingOutputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
-        outputFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
-    }
-}

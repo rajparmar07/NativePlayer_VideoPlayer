@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer
+package com.nativeplayer.videoplayer
 
 import android.app.Activity
 import android.os.Bundle
@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
         val factory = VideoPlayerViewModelFactory(repository, applicationContext)
         val viewModelInstance: VideoPlayerViewModel by viewModels { factory }
         viewModel = viewModelInstance
+        viewModel.registerMediaStoreObserver(this)
 
         // Register PiP control broadcasts
         val filter = IntentFilter().apply {
@@ -956,6 +957,9 @@ class MainActivity : ComponentActivity() {
         if (wasPausedOnLeave) {
             wasPausedOnLeave = false
             viewModel.play()
+        }
+        if (::viewModel.isInitialized) {
+            viewModel.onAppResumed(this)
         }
     }
 

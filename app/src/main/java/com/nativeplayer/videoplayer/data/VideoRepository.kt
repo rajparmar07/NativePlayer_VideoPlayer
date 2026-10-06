@@ -1,8 +1,14 @@
-﻿package com.nativeplayer.videoplayer.data
+package com.nativeplayer.videoplayer.data
 
 import android.content.Context
+import android.content.ContentUris
+import android.content.ContentValues
+import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.media.MediaScannerConnection
 import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -319,7 +325,8 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                 MediaStore.Video.Media.DATA,
                 MediaStore.Video.Media.DURATION,
                 MediaStore.Video.Media.SIZE,
-                MediaStore.Video.Media.RESOLUTION
+                MediaStore.Video.Media.RESOLUTION,
+                MediaStore.Video.Media.DATE_MODIFIED
             )
 
             val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
@@ -338,13 +345,20 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                     val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
                     val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
                     val resolutionColumn = cursor.getColumnIndex(MediaStore.Video.Media.RESOLUTION)
+                    val dateModifiedColumn = cursor.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
 
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idColumn).toString()
                         val rawName = cursor.getString(nameColumn) ?: ""
                         val path = cursor.getString(dataColumn) ?: continue
                         val file = File(path)
-                        if (!file.exists()) continue
+                        if (!file.exists()) {
+                            // Video was deleted externally: notify MediaScanner in background to prune stale MediaStore row
+                            try {
+                                MediaScannerConnection.scanFile(context, arrayOf(path), null, null)
+                            } catch (_: Exception) {}
+                            continue
+                        }
 
                         val name = if (rawName.isBlank() || rawName.startsWith("Video-")) file.name else rawName
                         val size = cursor.getLong(sizeColumn)
@@ -366,6 +380,9 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                         val rawResolution = if (resolutionColumn != -1) cursor.getString(resolutionColumn) else null
                         val parsedResolution = VideoModel.parseResolutionLabel(rawResolution)
 
+                        val dateSec = if (dateModifiedColumn != -1) cursor.getLong(dateModifiedColumn) else 0L
+                        val actualDateModified = if (dateSec > 0L) dateSec * 1000L else file.lastModified()
+
                         videosList.add(
                             VideoModel(
                                 id = id,
@@ -374,7 +391,8 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                                 duration = actualDuration,
                                 size = actualSize,
                                 isLocal = true,
-                                resolution = parsedResolution
+                                resolution = parsedResolution,
+                                dateModified = actualDateModified
                             )
                         )
                     }
@@ -386,25 +404,159 @@ class VideoRepository(private val dao: VideoPlayerDao) {
         }
     }
 
+    /**
+     * Inspects the folder currently open in the UI and indexes any new video files
+     * that were placed into it externally but not yet processed by MediaStore.
+     */
+    fun scanDirectoryForNewVideos(
+        context: Context,
+        folderPath: String,
+        knownPaths: Set<String>,
+        onScanned: () -> Unit
+    ) {
+        try {
+            val dir = File(folderPath)
+            if (!dir.exists() || !dir.isDirectory) return
+            val videoExtensions = setOf("mp4", "mkv", "webm", "avi", "mov", "3gp", "flv", "ts", "m4v", "wmv")
+            val diskFiles = dir.listFiles { f -> f.isFile && f.extension.lowercase() in videoExtensions } ?: return
+            val missingFromMediaStore = diskFiles.filter { it.absolutePath !in knownPaths }
+            if (missingFromMediaStore.isNotEmpty()) {
+                val pathsToScan = missingFromMediaStore.map { it.absolutePath }.toTypedArray()
+                MediaScannerConnection.scanFile(context, pathsToScan, null) { _, _ ->
+                    onScanned()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("VideoRepository", "Error scanning directory for new videos: ${e.message}")
+        }
+    }
+
+    // MediaStore & Scoped Storage Helpers
+    fun getMediaUriForVideo(context: Context, video: VideoModel): Uri? {
+        val idLong = video.id.toLongOrNull()
+        if (idLong != null && idLong > 0) {
+            return ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, idLong)
+        }
+        val projection = arrayOf(MediaStore.Video.Media._ID)
+        val selection = "${MediaStore.Video.Media.DATA} = ?"
+        val selectionArgs = arrayOf(video.urlOrPath)
+        try {
+            context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
+                    return ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
+    fun getRelativePathForFolder(folderPath: String): String {
+        val clean = folderPath.replace('\\', '/')
+        val storageRoots = listOf(
+            Environment.getExternalStorageDirectory().absolutePath.replace('\\', '/'),
+            "/storage/emulated/0"
+        )
+        var rel = clean
+        for (root in storageRoots) {
+            if (rel.startsWith(root, ignoreCase = true)) {
+                rel = rel.substring(root.length).trimStart('/')
+                break
+            }
+        }
+        if (rel.startsWith("storage/")) {
+            val parts = rel.split('/')
+            if (parts.size >= 2) {
+                rel = parts.drop(2).joinToString("/")
+            }
+        }
+        if (rel.isBlank() || rel == "/") {
+            rel = Environment.DIRECTORY_MOVIES
+        }
+        return if (rel.endsWith("/")) rel else "$rel/"
+    }
+
+    fun getMimeType(filePath: String): String {
+        val ext = File(filePath).extension.lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "video/mp4"
+    }
+
+    fun checkFileExistsInFolder(context: Context, targetDirPath: String, fileName: String): Boolean {
+        val directFile = File(targetDirPath, fileName)
+        if (directFile.exists()) return true
+        val relPath = getRelativePathForFolder(targetDirPath)
+        val projection = arrayOf(MediaStore.Video.Media._ID)
+        val selection = "${MediaStore.Video.Media.DISPLAY_NAME} = ? AND ${MediaStore.Video.Media.RELATIVE_PATH} = ?"
+        val selectionArgs = arrayOf(fileName, relPath)
+        try {
+            context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )?.use { cursor ->
+                return cursor.count > 0
+            }
+        } catch (_: Exception) {}
+        return false
+    }
+
     // Single Video File Operations
     suspend fun renameVideoFile(context: Context, video: VideoModel, newNameRaw: String): Result<String> {
         return withContext(Dispatchers.IO) {
             try {
                 val oldFile = File(video.urlOrPath)
-                if (!oldFile.exists()) {
-                    return@withContext Result.failure(Exception("File does not exist"))
-                }
-                
-                val ext = oldFile.extension
+                val ext = oldFile.extension.ifEmpty { "mp4" }
                 var newName = newNameRaw.trim()
                 if (ext.isNotEmpty() && !newName.endsWith(".$ext", ignoreCase = true)) {
                     newName = "$newName.$ext"
                 }
 
+                val titleWithoutExt = newName.substringBeforeLast('.')
+                val contentUri = getMediaUriForVideo(context, video)
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && contentUri != null) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Video.Media.DISPLAY_NAME, newName)
+                        put(MediaStore.Video.Media.TITLE, titleWithoutExt)
+                    }
+                    val updatedRows = try {
+                        context.contentResolver.update(contentUri, values, null, null)
+                    } catch (e: Exception) {
+                        Log.e("VideoRepository", "ContentResolver.update failed: ${e.message}")
+                        0
+                    }
+                    if (updatedRows > 0) {
+                        var newPath = File(oldFile.parentFile, newName).absolutePath
+                        try {
+                            context.contentResolver.query(
+                                contentUri,
+                                arrayOf(MediaStore.Video.Media.DATA),
+                                null,
+                                null,
+                                null
+                            )?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    newPath = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)) ?: newPath
+                                }
+                            }
+                        } catch (_: Exception) {}
+                        deleteDownloadByFilePath(oldFile.absolutePath)
+                        return@withContext Result.success(newPath)
+                    }
+                }
+
+                // Fallback for API < 29 or direct file rename
                 val parentDir = oldFile.parentFile ?: return@withContext Result.failure(Exception("Invalid directory"))
                 val newFile = File(parentDir, newName)
 
-                // If unchanged, treat as success immediately
                 if (newFile.absolutePath.equals(oldFile.absolutePath, ignoreCase = false)) {
                     return@withContext Result.success(oldFile.absolutePath)
                 }
@@ -413,78 +565,15 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                     return@withContext Result.failure(Exception("A file with this name already exists"))
                 }
 
-                var success = false
-                try {
-                    success = oldFile.renameTo(newFile)
-                } catch (e: Exception) {
-                    Log.e("VideoRepository", "renameTo failed: ${e.message}")
-                }
-
-                // If direct rename failed, try copy + delete fallback if storage permits
-                if (!success && oldFile.exists() && !newFile.exists()) {
-                    try {
-                        oldFile.copyTo(newFile, overwrite = false)
-                        if (newFile.exists() && newFile.length() == oldFile.length()) {
-                            oldFile.delete()
-                            purgeFileFromMediaStore(context, oldFile)
-                            success = true
-                        }
-                    } catch (e: Exception) {
-                        Log.e("VideoRepository", "Copy-delete fallback failed: ${e.message}")
-                    }
-                }
-
-                // If still not renamed, attempt MediaStore ContentResolver update
-                if (!success) {
-                    try {
-                        val projection = arrayOf(MediaStore.Video.Media._ID)
-                        val selection = "${MediaStore.Video.Media.DATA} = ?"
-                        val selectionArgs = arrayOf(oldFile.absolutePath)
-                        context.contentResolver.query(
-                            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                            projection,
-                            selection,
-                            selectionArgs,
-                            null
-                        )?.use { cursor ->
-                            if (cursor.moveToFirst()) {
-                                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
-                                val contentUri = android.content.ContentUris.withAppendedId(
-                                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                                    id
-                                )
-                                val values = android.content.ContentValues().apply {
-                                    put(MediaStore.Video.Media.DISPLAY_NAME, newName)
-                                    put(MediaStore.Video.Media.TITLE, newName.substringBeforeLast('.'))
-                                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                                        put(MediaStore.Video.Media.DATA, newFile.absolutePath)
-                                    }
-                                }
-                                val updatedRows = context.contentResolver.update(contentUri, values, null, null)
-                                if (updatedRows > 0) {
-                                    success = true
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e("VideoRepository", "MediaStore update failed: ${e.message}")
-                    }
-                }
-
+                var success = try { oldFile.renameTo(newFile) } catch (_: Exception) { false }
                 if (success || newFile.exists()) {
                     deleteDownloadByFilePath(oldFile.absolutePath)
                     purgeFileFromMediaStore(context, oldFile)
-                    // Update MediaStore for the new file
-                    android.media.MediaScannerConnection.scanFile(
-                        context,
-                        arrayOf(oldFile.absolutePath, newFile.absolutePath),
-                        null,
-                        null
-                    )
-                    Result.success(newFile.absolutePath)
-                } else {
-                    Result.failure(Exception("Failed to rename file. Please check storage permissions."))
+                    scanFileSuspend(context, newFile.absolutePath)
+                    return@withContext Result.success(newFile.absolutePath)
                 }
+
+                Result.failure(Exception("Failed to rename video"))
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -494,23 +583,20 @@ class VideoRepository(private val dao: VideoPlayerDao) {
     suspend fun deleteVideoFile(context: Context, video: VideoModel): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                val file = File(video.urlOrPath)
+                val contentUri = getMediaUriForVideo(context, video)
                 var deleted = false
-                if (file.exists()) {
-                    deleted = file.delete()
+                if (contentUri != null) {
+                    val rows = try {
+                        context.contentResolver.delete(contentUri, null, null)
+                    } catch (_: Exception) { 0 }
+                    deleted = rows > 0
                 }
-
-                // Delete from downloads database if present
+                val file = File(video.urlOrPath)
+                if (file.exists()) {
+                    deleted = file.delete() || deleted
+                }
                 deleteDownloadByFilePath(video.urlOrPath)
-
-                // Rescan / remove from MediaStore
-                android.media.MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(video.urlOrPath),
-                    null,
-                    null
-                )
-
+                purgeFileFromMediaStore(context, file)
                 Result.success(deleted)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -540,7 +626,7 @@ class VideoRepository(private val dao: VideoPlayerDao) {
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
-                    val contentUri = android.content.ContentUris.withAppendedId(
+                    val contentUri = ContentUris.withAppendedId(
                         MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                         id
                     )
@@ -568,52 +654,111 @@ class VideoRepository(private val dao: VideoPlayerDao) {
         return withContext(Dispatchers.IO) {
             try {
                 val srcFile = File(video.urlOrPath)
-                if (!srcFile.exists()) {
-                    return@withContext Result.failure(Exception("Source file does not exist"))
-                }
+                val srcUri = getMediaUriForVideo(context, video)
+                val totalBytes = if (video.size > 0) video.size else if (srcFile.exists()) srcFile.length() else 0L
+                val relativePath = getRelativePathForFolder(targetDirPath)
+                val mimeType = getMimeType(video.urlOrPath)
 
-                val targetDir = File(targetDirPath)
-                if (!targetDir.exists()) {
-                    targetDir.mkdirs()
-                }
-
-                var destFile = File(targetDir, srcFile.name)
-                if (destFile.exists()) {
-                    if (overwrite) {
-                        destFile.delete()
-                        purgeFileFromMediaStore(context, destFile)
-                    } else {
+                var destFileName = srcFile.name
+                if (!overwrite) {
+                    val existsInTarget = checkFileExistsInFolder(context, targetDirPath, destFileName)
+                    if (existsInTarget) {
                         val nameWithoutExt = srcFile.nameWithoutExtension
                         val ext = srcFile.extension
-                        val newName = if (ext.isNotEmpty()) "${nameWithoutExt}_copy.$ext" else "${nameWithoutExt}_copy"
-                        destFile = File(targetDir, newName)
+                        destFileName = if (ext.isNotEmpty()) "${nameWithoutExt}_copy.$ext" else "${nameWithoutExt}_copy"
                     }
                 }
 
-                val totalBytes = srcFile.length()
-                var bytesTransferred = 0L
-                val buffer = ByteArray(64 * 1024)
-                var lastReportTime = 0L
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.Video.Media.DISPLAY_NAME, destFileName)
+                        put(MediaStore.Video.Media.MIME_TYPE, mimeType)
+                        put(MediaStore.Video.Media.RELATIVE_PATH, relativePath)
+                        put(MediaStore.Video.Media.IS_PENDING, 1)
+                    }
 
-                srcFile.inputStream().use { input ->
-                    destFile.outputStream().use { output ->
-                        var read = input.read(buffer)
-                        while (read != -1) {
-                            output.write(buffer, 0, read)
-                            bytesTransferred += read
+                    val destUri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
+                        ?: return@withContext Result.failure(Exception("Failed to create destination file in MediaStore"))
 
-                            val now = System.currentTimeMillis()
-                            if (now - lastReportTime > 100 || bytesTransferred == totalBytes) {
-                                lastReportTime = now
-                                onProgress(bytesTransferred, totalBytes)
+                    var bytesTransferred = 0L
+                    val buffer = ByteArray(64 * 1024)
+                    var lastReportTime = 0L
+
+                    val inputStream = if (srcFile.exists() && srcFile.canRead()) {
+                        srcFile.inputStream()
+                    } else if (srcUri != null) {
+                        context.contentResolver.openInputStream(srcUri)
+                    } else null
+
+                    if (inputStream == null) {
+                        context.contentResolver.delete(destUri, null, null)
+                        return@withContext Result.failure(Exception("Cannot read source video"))
+                    }
+
+                    inputStream.use { input ->
+                        val outputStream = context.contentResolver.openOutputStream(destUri)
+                            ?: run {
+                                context.contentResolver.delete(destUri, null, null)
+                                return@withContext Result.failure(Exception("Cannot open destination output stream"))
                             }
-                            read = input.read(buffer)
+                        outputStream.use { output ->
+                            var read = input.read(buffer)
+                            while (read != -1) {
+                                output.write(buffer, 0, read)
+                                bytesTransferred += read
+                                val now = System.currentTimeMillis()
+                                if (now - lastReportTime > 100 || (totalBytes > 0 && bytesTransferred >= totalBytes)) {
+                                    lastReportTime = now
+                                    onProgress(bytesTransferred, totalBytes)
+                                }
+                                read = input.read(buffer)
+                            }
                         }
                     }
-                }
 
-                scanFileSuspend(context, destFile.absolutePath)
-                Result.success(destFile.absolutePath)
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Video.Media.IS_PENDING, 0)
+                    context.contentResolver.update(destUri, contentValues, null, null)
+
+                    var finalPath = File(targetDirPath, destFileName).absolutePath
+                    try {
+                        context.contentResolver.query(destUri, arrayOf(MediaStore.Video.Media.DATA), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                finalPath = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)) ?: finalPath
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    scanFileSuspend(context, finalPath)
+                    return@withContext Result.success(finalPath)
+                } else {
+                    // Pre-Android 10
+                    val targetDir = File(targetDirPath)
+                    if (!targetDir.exists()) targetDir.mkdirs()
+                    var destFile = File(targetDir, destFileName)
+
+                    var bytesTransferred = 0L
+                    val buffer = ByteArray(64 * 1024)
+                    var lastReportTime = 0L
+
+                    srcFile.inputStream().use { input ->
+                        destFile.outputStream().use { output ->
+                            var read = input.read(buffer)
+                            while (read != -1) {
+                                output.write(buffer, 0, read)
+                                bytesTransferred += read
+                                val now = System.currentTimeMillis()
+                                if (now - lastReportTime > 100 || (totalBytes > 0 && bytesTransferred >= totalBytes)) {
+                                    lastReportTime = now
+                                    onProgress(bytesTransferred, totalBytes)
+                                }
+                                read = input.read(buffer)
+                            }
+                        }
+                    }
+                    scanFileSuspend(context, destFile.absolutePath)
+                    return@withContext Result.success(destFile.absolutePath)
+                }
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -646,31 +791,40 @@ class VideoRepository(private val dao: VideoPlayerDao) {
         return withContext(Dispatchers.IO) {
             try {
                 val srcFile = File(video.urlOrPath)
-                if (!srcFile.exists()) {
-                    return@withContext Result.failure(Exception("Source file does not exist"))
-                }
+                val contentUri = getMediaUriForVideo(context, video)
+                val totalBytes = if (video.size > 0) video.size else if (srcFile.exists()) srcFile.length() else 0L
+                val targetRelativePath = getRelativePathForFolder(targetDirPath)
 
-                val targetDir = File(targetDirPath)
-                if (!targetDir.exists()) {
-                    targetDir.mkdirs()
-                }
-
-                var destFile = File(targetDir, srcFile.name)
-                if (destFile.exists()) {
-                    if (overwrite) {
-                        destFile.delete()
-                        purgeFileFromMediaStore(context, destFile)
-                    } else {
-                        val nameWithoutExt = srcFile.nameWithoutExtension
-                        val ext = srcFile.extension
-                        val newName = if (ext.isNotEmpty()) "${nameWithoutExt}_moved.$ext" else "${nameWithoutExt}_moved"
-                        destFile = File(targetDir, newName)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && contentUri != null) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Video.Media.RELATIVE_PATH, targetRelativePath)
+                    }
+                    val updatedRows = try {
+                        context.contentResolver.update(contentUri, values, null, null)
+                    } catch (e: Exception) {
+                        Log.e("VideoRepository", "RELATIVE_PATH update failed: ${e.message}")
+                        0
+                    }
+                    if (updatedRows > 0) {
+                        onProgress(totalBytes, totalBytes)
+                        var newPath = File(targetDirPath, srcFile.name).absolutePath
+                        try {
+                            context.contentResolver.query(contentUri, arrayOf(MediaStore.Video.Media.DATA), null, null, null)?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    newPath = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)) ?: newPath
+                                }
+                            }
+                        } catch (_: Exception) {}
+                        deleteDownloadByFilePath(srcFile.absolutePath)
+                        scanFileSuspend(context, newPath)
+                        return@withContext Result.success(newPath)
                     }
                 }
 
-                val totalBytes = srcFile.length()
-
-                // Try atomic OS rename first (moves file in 1ms on same storage volume & guarantees removal from source folder)
+                // Fallback 1: Atomic OS rename (same volume or pre-Q)
+                val targetDir = File(targetDirPath)
+                if (!targetDir.exists()) targetDir.mkdirs()
+                val destFile = File(targetDir, srcFile.name)
                 val movedAtomically = try { srcFile.renameTo(destFile) } catch (_: Exception) { false }
                 if (movedAtomically) {
                     onProgress(totalBytes, totalBytes)
@@ -680,54 +834,14 @@ class VideoRepository(private val dao: VideoPlayerDao) {
                     return@withContext Result.success(destFile.absolutePath)
                 }
 
-                // Fallback for cross-volume moves: Stream copy with real-time progress update
-                var bytesTransferred = 0L
-                val buffer = ByteArray(64 * 1024)
-                var lastReportTime = 0L
-
-                srcFile.inputStream().use { input ->
-                    destFile.outputStream().use { output ->
-                        var read = input.read(buffer)
-                        while (read != -1) {
-                            output.write(buffer, 0, read)
-                            bytesTransferred += read
-
-                            val now = System.currentTimeMillis()
-                            if (now - lastReportTime > 100 || bytesTransferred == totalBytes) {
-                                lastReportTime = now
-                                onProgress(bytesTransferred, totalBytes)
-                            }
-                            read = input.read(buffer)
-                        }
-                    }
+                // Fallback 2: MediaStore stream copy + delete source
+                val copyResult = copyVideoFileWithProgress(context, video, targetDirPath, overwrite, onProgress)
+                if (copyResult.isSuccess) {
+                    deleteVideoFile(context, video)
+                    return@withContext copyResult
                 }
 
-                // Verify destination file created cleanly
-                if (destFile.exists() && (totalBytes == 0L || destFile.length() >= totalBytes)) {
-                    // Remove source file from storage
-                    if (srcFile.exists()) {
-                        var deleted = srcFile.delete()
-                        if (!deleted) {
-                            try {
-                                val fos = java.io.FileOutputStream(srcFile)
-                                fos.channel.truncate(0)
-                                fos.close()
-                            } catch (_: Exception) {}
-                            deleted = srcFile.delete()
-                        }
-                    }
-
-                    // Remove source record from MediaStore ContentResolver
-                    purgeFileFromMediaStore(context, srcFile)
-
-                    // Await MediaScanner indexing for both source & destination
-                    scanFileSuspend(context, srcFile.absolutePath)
-                    scanFileSuspend(context, destFile.absolutePath)
-
-                    Result.success(destFile.absolutePath)
-                } else {
-                    Result.failure(Exception("Failed to move file"))
-                }
+                Result.failure(Exception("Failed to move video"))
             } catch (e: Exception) {
                 Result.failure(e)
             }
