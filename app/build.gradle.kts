@@ -44,8 +44,8 @@ android {
     }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
   }
   buildFeatures {
     compose = true
@@ -53,14 +53,24 @@ android {
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   kotlinOptions {
-    jvmTarget = "11"
+    jvmTarget = "17"
+  }
+
+  splits {
+    abi {
+      isEnable = true
+      reset()
+      include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+      isUniversalApk = true
+    }
   }
 
   applicationVariants.all {
     val variant = this
     outputs.all {
       val output = this as? com.android.build.gradle.api.ApkVariantOutput
-      output?.outputFileName = "native_player_v${variant.versionName}.apk"
+      val abiFilter = output?.getFilter(com.android.build.VariantOutput.FilterType.ABI) ?: "universal"
+      output?.outputFileName = "native_player_v${variant.versionName}-$abiFilter.apk"
     }
   }
 }
