@@ -41,8 +41,7 @@ is stored **strictly on your device** within the application's private SQLite/Ro
 Native Player requests only the minimum permissions necessary to deliver core media playback and file management functionality. Permissions are never used for data harvesting or tracking.
 
 | Permission | Technical Name | Purpose & Usage |
-| :--- | :--- | :--- |
-| **Photos & Videos / Storage** | `READ_MEDIA_VIDEO`, `READ_EXTERNAL_STORAGE`, `MANAGE_EXTERNAL_STORAGE` | Used exclusively to scan, display, and play local video files on your device storage, and to perform user-initiated file management actions (such as rename, copy, move, and delete). Video files are processed strictly on your device. |
+| **Photos & Videos / Storage** | `READ_MEDIA_VIDEO`, `READ_MEDIA_VISUAL_USER_SELECTED`, `READ_EXTERNAL_STORAGE` | Used exclusively to scan, display, and play local video files on your device storage. File modifications (such as rename, move, and delete) use official Android Scoped Storage MediaStore user-consent prompts without requiring broad All Files access. Video files are processed strictly on your device. |
 | **Network & Internet Access** | `INTERNET`, `ACCESS_NETWORK_STATE` | Used solely when you explicitly choose to play a remote network stream URL (HTTP, HTTPS, HLS `.m3u8`, RTSP, DASH) or download a remote video file to your local device storage. No telemetry or analytics data is transmitted. |
 | **Notifications** | `POST_NOTIFICATIONS` | Used on Android 13 (API 33) and above exclusively to display active media playback controls and background download progress in the system notification shade. |
 | **Foreground Service** | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK` | Used to ensure smooth, uninterrupted audio playback in Picture-in-Picture (PiP) mode and to complete active user-initiated video downloads in the background. |

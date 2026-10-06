@@ -1,11 +1,22 @@
-﻿package com.nativeplayer.videoplayer.viewmodel
+package com.nativeplayer.videoplayer.viewmodel
 
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import android.Manifest
+import android.content.pm.PackageManager
+import android.database.ContentObserver
+import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import androidx.core.content.ContextCompat
 import com.nativeplayer.videoplayer.data.*
 import java.io.File
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -851,12 +862,112 @@ data class VideoPlaybackState(
         }
     }
 
+    private var mediaStoreObserver: ContentObserver? = null
+    private var observerDebounceJob: Job? = null
+    private var isSyncInProgress = false
+
+    fun hasStoragePermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun registerMediaStoreObserver(context: Context) {
+        if (mediaStoreObserver != null) return
+        val handler = Handler(Looper.getMainLooper())
+        val observer = object : ContentObserver(handler) {
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                super.onChange(selfChange, uri)
+                // Debounce rapid bursts of notifications from other apps
+                observerDebounceJob?.cancel()
+                observerDebounceJob = viewModelScope.launch {
+                    delay(300)
+                    if (hasStoragePermission(appContext)) {
+                        syncLocalVideos(appContext, isBackgroundSync = true)
+                    }
+                }
+            }
+        }
+        try {
+            appContext.contentResolver.registerContentObserver(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                true,
+                observer
+            )
+            mediaStoreObserver = observer
+        } catch (e: Exception) {
+            android.util.Log.e("VideoPlayerViewModel", "Failed to register media store observer: ${e.message}")
+        }
+    }
+
+    fun onAppResumed(context: Context) {
+        if (hasStoragePermission(context)) {
+            syncLocalVideos(context, isBackgroundSync = true)
+        }
+    }
+
     fun scanLocalVideos(context: Context) {
+        syncLocalVideos(context, isBackgroundSync = false)
+    }
+
+    fun syncLocalVideos(context: Context, isBackgroundSync: Boolean = true) {
+        if (isSyncInProgress) return
         viewModelScope.launch {
-            _isScanning.value = true
-            val videos = repository.getLocalVideos(context)
-            _localVideos.value = videos
-            _isScanning.value = false
+            isSyncInProgress = true
+            if (!isBackgroundSync) {
+                _isScanning.value = true
+            }
+            try {
+                // If user is currently looking at a folder, check for new/unindexed files in that directory
+                val currentFolder = _selectedFolder.value
+                val currentTreePath = _selectedTreePath.value
+                val activePath = if (_displaySettings.value.displayMode == ListDisplayMode.MEMORY_TREE) {
+                    currentTreePath
+                } else if (currentFolder != null) {
+                    _localVideos.value.firstOrNull { File(it.urlOrPath).parentFile?.name == currentFolder }
+                        ?.urlOrPath?.let { File(it).parentFile?.absolutePath }
+                } else {
+                    null
+                }
+
+                if (activePath != null) {
+                    val knownPaths = _localVideos.value.map { it.urlOrPath }.toSet()
+                    repository.scanDirectoryForNewVideos(context, activePath, knownPaths) {
+                        viewModelScope.launch {
+                            val refreshedVideos = repository.getLocalVideos(context)
+                            updateVideosState(refreshedVideos)
+                        }
+                    }
+                }
+
+                val videos = repository.getLocalVideos(context)
+                updateVideosState(videos)
+            } catch (e: Exception) {
+                android.util.Log.e("VideoPlayerViewModel", "Error syncing local videos: ${e.message}")
+            } finally {
+                if (!isBackgroundSync) {
+                    _isScanning.value = false
+                }
+                isSyncInProgress = false
+            }
+        }
+    }
+
+    private fun updateVideosState(newVideos: List<VideoModel>) {
+        if (_localVideos.value != newVideos) {
+            _localVideos.value = newVideos
+            // Prune any selected IDs that were deleted externally
+            val validIds = newVideos.map { it.id }.toSet()
+            val currentSelection = _selectedVideoIds.value
+            val pruned = currentSelection.filter { it in validIds }.toSet()
+            if (pruned != currentSelection) {
+                _selectedVideoIds.value = pruned
+            }
         }
     }
 
@@ -1285,6 +1396,32 @@ data class VideoPlaybackState(
             } else {
                 onResult(false, "Failed to delete files")
             }
+        }
+    }
+
+    fun onVideosDeletedByMediaStore(context: Context, videos: List<VideoModel>) {
+        viewModelScope.launch {
+            val prefEditor = prefs.edit()
+            for (v in videos) {
+                prefEditor.remove("progress_${v.urlOrPath}")
+                repository.deleteDownloadByFilePath(v.urlOrPath)
+            }
+            prefEditor.apply()
+            scanLocalVideos(context)
+        }
+    }
+
+    fun getMediaUriForVideo(context: Context, video: VideoModel): android.net.Uri? {
+        return repository.getMediaUriForVideo(context, video)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        mediaStoreObserver?.let {
+            try {
+                appContext.contentResolver.unregisterContentObserver(it)
+            } catch (_: Exception) {}
+            mediaStoreObserver = null
         }
     }
 }
