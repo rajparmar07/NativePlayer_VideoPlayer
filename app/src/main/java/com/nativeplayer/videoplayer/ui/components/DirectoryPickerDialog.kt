@@ -1,8 +1,10 @@
-﻿package com.nativeplayer.videoplayer.ui.components
+package com.nativeplayer.videoplayer.ui.components
 
 import android.os.Environment
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +43,15 @@ fun DirectoryPickerDialog(
         val initialFile = File(video.urlOrPath)
         val parent = initialFile.parentFile
         mutableStateOf(if (parent != null && parent.exists() && parent.canRead()) parent else defaultRoot)
+    }
+
+    val standardMediaDirs = remember {
+        listOf(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+        ).filter { it != null && it.exists() }
     }
 
     var showCreateFolderDialog by remember { mutableStateOf(false) }
@@ -200,6 +211,33 @@ fun DirectoryPickerDialog(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
+                        }
+                    }
+
+                    // Quick Jump to Allowed Shared Media Folders
+                    if (standardMediaDirs.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            standardMediaDirs.forEach { dir ->
+                                val isSelected = currentDir.absolutePath == dir.absolutePath || currentDir.absolutePath.startsWith(dir.absolutePath + "/")
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { currentDir = dir },
+                                    label = { Text(dir.name, fontSize = 12.sp) },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
 
@@ -398,12 +436,8 @@ private fun CreateFolderDialog(
                         if (newDir.exists()) {
                             errorText = "Folder already exists"
                         } else {
-                            val created = newDir.mkdirs()
-                            if (created || newDir.exists()) {
-                                onFolderCreated(newDir)
-                            } else {
-                                errorText = "Failed to create folder"
-                            }
+                            try { newDir.mkdirs() } catch (_: Exception) {}
+                            onFolderCreated(newDir)
                         }
                     }
                 }

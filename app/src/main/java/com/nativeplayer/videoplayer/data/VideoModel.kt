@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.data
+package com.nativeplayer.videoplayer.data
 
 data class VideoModel(
     val id: String,
@@ -10,7 +10,8 @@ data class VideoModel(
     val isOffline: Boolean = false,
     val isStream: Boolean = false,
     val subtitleUrlOrPath: String? = null,
-    val resolution: String? = null
+    val resolution: String? = null,
+    val dateModified: Long = 0L
 ) {
     companion object {
         fun parseResolutionLabel(resolutionStr: String?): String? {

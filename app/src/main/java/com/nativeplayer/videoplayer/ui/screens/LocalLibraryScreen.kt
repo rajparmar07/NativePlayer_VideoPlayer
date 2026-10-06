@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.screens
+package com.nativeplayer.videoplayer.ui.screens
 
 import android.Manifest
 import android.os.Build
@@ -81,8 +81,17 @@ import com.nativeplayer.videoplayer.ui.components.FileOperationProgressDialog
 import com.nativeplayer.videoplayer.ui.components.DeleteConfirmationDialog
 import com.nativeplayer.videoplayer.ui.components.DuplicateFileDialog
 import com.nativeplayer.videoplayer.ui.components.GlobalCenteredLoader
-import com.nativeplayer.videoplayer.ui.components.ManageStoragePermissionDialog
-import com.nativeplayer.videoplayer.ui.components.hasAllFilesAccessPermission
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.provider.MediaStore
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nativeplayer.videoplayer.ui.components.BulkDeleteConfirmationDialog
 import com.nativeplayer.videoplayer.ui.components.DisplaySettingsDialog
 import com.nativeplayer.videoplayer.viewmodel.DisplaySettings
@@ -93,6 +102,14 @@ import com.nativeplayer.videoplayer.viewmodel.SortDirection
 import com.nativeplayer.videoplayer.viewmodel.SortField
 import com.nativeplayer.videoplayer.viewmodel.VideoTileInfo
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+
+sealed class PendingMediaOperation {
+    data class Rename(val video: VideoModel, val newName: String) : PendingMediaOperation()
+    data class MoveSingle(val video: VideoModel, val targetFolder: String, val overwrite: Boolean) : PendingMediaOperation()
+    data class MoveBulk(val videos: List<VideoModel>, val targetFolder: String, val overwrite: Boolean) : PendingMediaOperation()
+    data class DeleteSingle(val video: VideoModel) : PendingMediaOperation()
+    data class DeleteBulk(val videos: List<VideoModel>) : PendingMediaOperation()
+}
 
 @OptIn(ExperimentalPermissionsApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -130,10 +147,25 @@ fun LocalLibraryScreen(
 
     val permissionState = rememberPermissionState(permission = permissionType)
 
-    // Scan videos automatically when permission is granted and localVideos list is empty
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (permissionState.status.isGranted) {
+                    viewModel.syncLocalVideos(context, isBackgroundSync = true)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Scan videos automatically when permission is granted
     LaunchedEffect(permissionState.status.isGranted) {
-        if (permissionState.status.isGranted && localVideos.isEmpty()) {
-            viewModel.scanLocalVideos(context)
+        if (permissionState.status.isGranted) {
+            viewModel.syncLocalVideos(context, isBackgroundSync = localVideos.isNotEmpty())
         }
     }
 
@@ -316,7 +348,89 @@ fun LocalLibraryScreen(
     var activeActionVideo by remember { mutableStateOf<VideoModel?>(null) }
     var activeActionType by remember { mutableStateOf<VideoActionType?>(null) }
     var pendingDuplicateAction by remember { mutableStateOf<Triple<VideoModel, String, VideoActionType>?>(null) }
-    var showManagePermissionDialog by remember { mutableStateOf(false) }
+    var pendingMediaOperation by remember { mutableStateOf<PendingMediaOperation?>(null) }
+
+    val intentSenderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val op = pendingMediaOperation
+        pendingMediaOperation = null
+        if (result.resultCode == Activity.RESULT_OK && op != null) {
+            when (op) {
+                is PendingMediaOperation.Rename -> {
+                    viewModel.renameVideo(context, op.video, op.newName) { success, err ->
+                        if (success) {
+                            viewModel.showSnackbar("Renamed successfully")
+                            viewModel.clearSelectedVideoIds()
+                        } else {
+                            viewModel.showSnackbar(err ?: "Rename failed")
+                        }
+                    }
+                }
+                is PendingMediaOperation.MoveSingle -> {
+                    val currentFolderToChecking = selectedFolder
+                    val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                    viewModel.moveVideoWithProgress(context, op.video, op.targetFolder, overwrite = op.overwrite) { success, err ->
+                        if (success) {
+                            viewModel.showSnackbar("Video moved successfully")
+                            viewModel.clearSelectedVideoIds()
+                            if (currentFolderToChecking != null && count <= 1) {
+                                viewModel.setSelectedFolder(null)
+                            }
+                        } else {
+                            viewModel.showSnackbar(err ?: "Move failed")
+                        }
+                    }
+                }
+                is PendingMediaOperation.MoveBulk -> {
+                    val currentFolderToChecking = selectedFolder
+                    val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                    val moveCount = op.videos.size
+                    viewModel.moveMultipleVideosWithProgress(context, op.videos, op.targetFolder, overwrite = op.overwrite) { success, err ->
+                        if (success) {
+                            viewModel.showSnackbar("$moveCount videos moved")
+                            viewModel.clearSelectedVideoIds()
+                            if (currentFolderToChecking != null && count <= moveCount) {
+                                viewModel.setSelectedFolder(null)
+                            }
+                        } else {
+                            viewModel.showSnackbar(err ?: "Bulk move failed")
+                        }
+                    }
+                }
+                is PendingMediaOperation.DeleteSingle -> {
+                    viewModel.onVideosDeletedByMediaStore(context, listOf(op.video))
+                    viewModel.showSnackbar("Video deleted")
+                    viewModel.clearSelectedVideoIds()
+                    val currentFolderToChecking = selectedFolder
+                    val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                    if (currentFolderToChecking != null && count <= 1) {
+                        viewModel.setSelectedFolder(null)
+                    }
+                }
+                is PendingMediaOperation.DeleteBulk -> {
+                    viewModel.onVideosDeletedByMediaStore(context, op.videos)
+                    viewModel.showSnackbar("${op.videos.size} videos deleted")
+                    viewModel.clearSelectedVideoIds()
+                    val currentFolderToChecking = selectedFolder
+                    val count = groupedVideos[currentFolderToChecking]?.size ?: 0
+                    if (currentFolderToChecking != null && count <= op.videos.size) {
+                        viewModel.setSelectedFolder(null)
+                    }
+                }
+            }
+        } else if (result.resultCode != Activity.RESULT_OK) {
+            val cancelMsg = when (op) {
+                is PendingMediaOperation.Rename -> "Rename cancelled"
+                is PendingMediaOperation.MoveSingle, is PendingMediaOperation.MoveBulk -> "Move cancelled"
+                is PendingMediaOperation.DeleteSingle, is PendingMediaOperation.DeleteBulk -> "Delete cancelled"
+                null -> null
+            }
+            if (cancelMsg != null) {
+                viewModel.showSnackbar(cancelMsg)
+            }
+        }
+    }
     val selectedVideoIds by viewModel.selectedVideoIds.collectAsState()
     val showBulkDeleteDialog by viewModel.showBulkDeleteDialog.collectAsState()
     val showBulkCopyDialog by viewModel.showBulkCopyDialog.collectAsState()
@@ -927,9 +1041,7 @@ fun LocalLibraryScreen(
                 selectedCount = selectedVideos.size,
                 isBookmarked = isBookmarked,
                 onRename = {
-                    if (!hasAllFilesAccessPermission()) {
-                        showManagePermissionDialog = true
-                    } else if (selectedVideos.isNotEmpty()) {
+                    if (selectedVideos.isNotEmpty()) {
                         activeActionVideo = selectedVideos.first()
                         activeActionType = VideoActionType.RENAME
                     }
@@ -970,27 +1082,19 @@ fun LocalLibraryScreen(
                     }
                 },
                 onMove = {
-                    if (!hasAllFilesAccessPermission()) {
-                        showManagePermissionDialog = true
-                    } else {
-                        if (selectedVideos.size == 1) {
-                            activeActionVideo = selectedVideos.first()
-                            activeActionType = VideoActionType.MOVE
-                        } else if (selectedVideos.size > 1) {
-                            viewModel.setShowBulkMoveDialog(true)
-                        }
+                    if (selectedVideos.size == 1) {
+                        activeActionVideo = selectedVideos.first()
+                        activeActionType = VideoActionType.MOVE
+                    } else if (selectedVideos.size > 1) {
+                        viewModel.setShowBulkMoveDialog(true)
                     }
                 },
                 onDelete = {
-                    if (!hasAllFilesAccessPermission()) {
-                        showManagePermissionDialog = true
-                    } else {
-                        if (selectedVideos.size == 1) {
-                            activeActionVideo = selectedVideos.first()
-                            activeActionType = VideoActionType.DELETE
-                        } else if (selectedVideos.size > 1) {
-                            viewModel.setShowBulkDeleteDialog(true)
-                        }
+                    if (selectedVideos.size == 1) {
+                        activeActionVideo = selectedVideos.first()
+                        activeActionType = VideoActionType.DELETE
+                    } else if (selectedVideos.size > 1) {
+                        viewModel.setShowBulkDeleteDialog(true)
                     }
                 }
             )
@@ -1081,12 +1185,6 @@ fun LocalLibraryScreen(
         )
     }
 
-    if (showManagePermissionDialog) {
-        ManageStoragePermissionDialog(
-            onDismissRequest = { showManagePermissionDialog = false }
-        )
-    }
-
     if (activeActionVideo != null && activeActionType == VideoActionType.RENAME) {
         RenameVideoDialog(
             video = activeActionVideo!!,
@@ -1094,6 +1192,26 @@ fun LocalLibraryScreen(
             onConfirmRename = { newName ->
                 val v = activeActionVideo!!
                 dismissActionState()
+                val contentUri = viewModel.getMediaUriForVideo(context, v)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && contentUri != null) {
+                    val hasPermission = context.checkUriPermission(
+                        contentUri,
+                        android.os.Process.myPid(),
+                        android.os.Process.myUid(),
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    ) == PackageManager.PERMISSION_GRANTED
+
+                    if (!hasPermission) {
+                        try {
+                            val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, listOf(contentUri))
+                            pendingMediaOperation = PendingMediaOperation.Rename(v, newName)
+                            intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                            return@RenameVideoDialog
+                        } catch (e: Exception) {
+                            Log.e("LocalLibraryScreen", "createWriteRequest failed: ${e.message}")
+                        }
+                    }
+                }
                 viewModel.renameVideo(context, v, newName) { success, err ->
                     if (success) {
                         viewModel.showSnackbar("Renamed successfully")
@@ -1141,6 +1259,26 @@ fun LocalLibraryScreen(
                             }
                         }
                         VideoActionType.MOVE -> {
+                            val contentUri = viewModel.getMediaUriForVideo(context, v)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && contentUri != null) {
+                                val hasPermission = context.checkUriPermission(
+                                    contentUri,
+                                    android.os.Process.myPid(),
+                                    android.os.Process.myUid(),
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                ) == PackageManager.PERMISSION_GRANTED
+
+                                if (!hasPermission) {
+                                    try {
+                                        val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, listOf(contentUri))
+                                        pendingMediaOperation = PendingMediaOperation.MoveSingle(v, targetFolder, overwrite = false)
+                                        intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                                        return@DirectoryPickerDialog
+                                    } catch (e: Exception) {
+                                        Log.e("LocalLibraryScreen", "createWriteRequest failed: ${e.message}")
+                                    }
+                                }
+                            }
                             val currentFolderToChecking = selectedFolder
                             val count = groupedVideos[currentFolderToChecking]?.size ?: 0
                             viewModel.moveVideoWithProgress(context, v, targetFolder, overwrite = false) { success, err ->
@@ -1183,6 +1321,26 @@ fun LocalLibraryScreen(
                         }
                     }
                     VideoActionType.MOVE -> {
+                        val contentUri = viewModel.getMediaUriForVideo(context, v)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && contentUri != null) {
+                            val hasPermission = context.checkUriPermission(
+                                contentUri,
+                                android.os.Process.myPid(),
+                                android.os.Process.myUid(),
+                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                            if (!hasPermission) {
+                                try {
+                                    val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, listOf(contentUri))
+                                    pendingMediaOperation = PendingMediaOperation.MoveSingle(v, targetFolder, overwrite = true)
+                                    intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                                    return@DuplicateFileDialog
+                                } catch (e: Exception) {
+                                    Log.e("LocalLibraryScreen", "createWriteRequest failed: ${e.message}")
+                                }
+                            }
+                        }
                         val currentFolderToChecking = selectedFolder
                         val count = groupedVideos[currentFolderToChecking]?.size ?: 0
                         viewModel.moveVideoWithProgress(context, v, targetFolder, overwrite = true) { success, err ->
@@ -1214,6 +1372,26 @@ fun LocalLibraryScreen(
                         }
                     }
                     VideoActionType.MOVE -> {
+                        val contentUri = viewModel.getMediaUriForVideo(context, v)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && contentUri != null) {
+                            val hasPermission = context.checkUriPermission(
+                                contentUri,
+                                android.os.Process.myPid(),
+                                android.os.Process.myUid(),
+                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                            if (!hasPermission) {
+                                try {
+                                    val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, listOf(contentUri))
+                                    pendingMediaOperation = PendingMediaOperation.MoveSingle(v, targetFolder, overwrite = false)
+                                    intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                                    return@DuplicateFileDialog
+                                } catch (e: Exception) {
+                                    Log.e("LocalLibraryScreen", "createWriteRequest failed: ${e.message}")
+                                }
+                            }
+                        }
                         val currentFolderToChecking = selectedFolder
                         val count = groupedVideos[currentFolderToChecking]?.size ?: 0
                         viewModel.moveVideoWithProgress(context, v, targetFolder, overwrite = false) { success, err ->
@@ -1245,9 +1423,20 @@ fun LocalLibraryScreen(
             onDismissRequest = dismissActionState,
             onConfirmDelete = {
                 val v = activeActionVideo!!
+                dismissActionState()
+                val contentUri = viewModel.getMediaUriForVideo(context, v)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && contentUri != null) {
+                    try {
+                        val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, listOf(contentUri))
+                        pendingMediaOperation = PendingMediaOperation.DeleteSingle(v)
+                        intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                        return@DeleteConfirmationDialog
+                    } catch (e: Exception) {
+                        Log.e("LocalLibraryScreen", "createDeleteRequest failed: ${e.message}")
+                    }
+                }
                 val currentFolderToChecking = selectedFolder
                 val count = groupedVideos[currentFolderToChecking]?.size ?: 0
-                dismissActionState()
                 viewModel.deleteVideo(context, v) { success, err ->
                     if (success) {
                         viewModel.showSnackbar("Video deleted")
@@ -1296,6 +1485,24 @@ fun LocalLibraryScreen(
                 onDismissRequest = { viewModel.setShowBulkMoveDialog(false) },
                 onFolderSelected = { targetFolder ->
                     viewModel.setShowBulkMoveDialog(false)
+                    val urisToRequest = selectedVideos.mapNotNull { viewModel.getMediaUriForVideo(context, it) }.filter { uri ->
+                        context.checkUriPermission(
+                            uri,
+                            android.os.Process.myPid(),
+                            android.os.Process.myUid(),
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        ) != PackageManager.PERMISSION_GRANTED
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && urisToRequest.isNotEmpty()) {
+                        try {
+                            val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, urisToRequest)
+                            pendingMediaOperation = PendingMediaOperation.MoveBulk(selectedVideos, targetFolder, overwrite = false)
+                            intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                            return@DirectoryPickerDialog
+                        } catch (e: Exception) {
+                            Log.e("LocalLibraryScreen", "createWriteRequest failed: ${e.message}")
+                        }
+                    }
                     val currentFolderToChecking = selectedFolder
                     val count = groupedVideos[currentFolderToChecking]?.size ?: 0
                     val moveCount = selectedVideos.size
@@ -1323,6 +1530,17 @@ fun LocalLibraryScreen(
             onDismissRequest = { viewModel.setShowBulkDeleteDialog(false) },
             onConfirmDelete = {
                 viewModel.setShowBulkDeleteDialog(false)
+                val urisToDelete = selectedVideos.mapNotNull { viewModel.getMediaUriForVideo(context, it) }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && urisToDelete.isNotEmpty()) {
+                    try {
+                        val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, urisToDelete)
+                        pendingMediaOperation = PendingMediaOperation.DeleteBulk(selectedVideos)
+                        intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                        return@BulkDeleteConfirmationDialog
+                    } catch (e: Exception) {
+                        Log.e("LocalLibraryScreen", "createDeleteRequest failed: ${e.message}")
+                    }
+                }
                 val currentFolderToChecking = selectedFolder
                 val count = groupedVideos[currentFolderToChecking]?.size ?: 0
                 val deleteCount = selectedVideos.size
