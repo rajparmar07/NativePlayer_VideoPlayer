@@ -85,32 +85,11 @@ fun DirectoryPickerDialog(
         else -> "Select Here"
     }
 
-    Dialog(
+    EdgeToEdgeBottomSheetDialog(
         onDismissRequest = onDismissRequest,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        modifier = Modifier.testTag("directory_picker_dialog"),
+        contentPadding = PaddingValues(16.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clickable(onClick = onDismissRequest),
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = false, onClick = {})
-                    .testTag("directory_picker_dialog"),
-                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 0.dp, bottomEnd = 0.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 6.dp,
-                shadowElevation = 12.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(16.dp)
-                ) {
                     // Header Row
                     Row(
                         modifier = Modifier
@@ -246,7 +225,8 @@ fun DirectoryPickerDialog(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(180.dp),
+                                .weight(1f, fill = false)
+                                .heightIn(max = 180.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -259,7 +239,8 @@ fun DirectoryPickerDialog(
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(200.dp)
+                                .weight(1f, fill = false)
+                                .heightIn(max = 240.dp)
                         ) {
                             items(subDirectories, key = { it.absolutePath }) { folder ->
                                 val childCount = remember(folder) {
@@ -344,7 +325,7 @@ fun DirectoryPickerDialog(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(top = 12.dp),
+                            .padding(top = 12.dp, bottom = 4.dp),
                         horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -360,9 +341,6 @@ fun DirectoryPickerDialog(
                             Text(actionButtonText)
                         }
                     }
-                }
-            }
-        }
     }
 
     if (showCreateFolderDialog) {

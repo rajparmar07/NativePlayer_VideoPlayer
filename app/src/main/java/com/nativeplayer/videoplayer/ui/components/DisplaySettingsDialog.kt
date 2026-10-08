@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.components
+package com.nativeplayer.videoplayer.ui.components
 
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -34,36 +34,11 @@ fun DisplaySettingsDialog(
 ) {
     var draftSettings by remember(initialSettings) { mutableStateOf(initialSettings) }
 
-    Dialog(
+    EdgeToEdgeBottomSheetDialog(
         onDismissRequest = onDismissRequest,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true
-        )
+        modifier = Modifier.testTag("display_settings_dialog"),
+        contentModifier = Modifier.testTag("display_settings_dialog")
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.5f))
-                .clickable { onDismissRequest() },
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = false) {},
-                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 16.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 20.dp, vertical = 16.dp)
-                        .testTag("display_settings_dialog")
-                ) {
                     // Top Drag Handle Indicator
                     Box(
                         modifier = Modifier
@@ -115,6 +90,7 @@ fun DisplaySettingsDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .weight(1f, fill = false)
                             .heightIn(max = 480.dp)
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -386,6 +362,8 @@ fun DisplaySettingsDialog(
                                 )
                             }
                         }
+
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -394,7 +372,9 @@ fun DisplaySettingsDialog(
 
                     // Bottom Apply & Cancel Action Row
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         OutlinedButton(
@@ -420,9 +400,6 @@ fun DisplaySettingsDialog(
                             Text("Apply")
                         }
                     }
-                }
-            }
-        }
     }
 }
 

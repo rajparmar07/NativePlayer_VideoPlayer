@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.components
+package com.nativeplayer.videoplayer.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -44,36 +44,14 @@ fun VideoActionsBottomSheet(
     onDismissRequest: () -> Unit,
     onActionSelected: (VideoActionType) -> Unit
 ) {
-    Dialog(
+    EdgeToEdgeBottomSheetDialog(
         onDismissRequest = onDismissRequest,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true
-        )
+        topCornerRadius = 20.dp,
+        contentPadding = PaddingValues(bottom = 16.dp, start = 16.dp, end = 16.dp, top = 12.dp),
+        contentModifier = Modifier
+            .testTag("video_actions_bottom_sheet")
+            .verticalScroll(rememberScrollState())
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.5f))
-                .clickable { onDismissRequest() },
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = false) {},
-                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 8.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(bottom = 16.dp, start = 16.dp, end = 16.dp, top = 12.dp)
-                        .testTag("video_actions_bottom_sheet")
-                ) {
                     // Drag handle indicator
                     Box(
                         modifier = Modifier
@@ -184,9 +162,6 @@ fun VideoActionsBottomSheet(
                         },
                         testTag = "action_delete"
                     )
-                }
-            }
-        }
     }
 }
 

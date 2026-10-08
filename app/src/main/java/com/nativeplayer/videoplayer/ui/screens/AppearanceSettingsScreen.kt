@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.screens
+package com.nativeplayer.videoplayer.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.draw.clip
+import com.nativeplayer.videoplayer.ui.components.EdgeToEdgeBottomSheetDialog
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -317,38 +318,9 @@ fun AppearanceSettingsScreen(
 
         // ── 1. Integrated Theme & Color Palette Bottom Sheet Popup ─────────────
         if (showThemeDialog) {
-            Dialog(
-                onDismissRequest = { showThemeDialog = false },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnBackPress = true,
-                    dismissOnClickOutside = true
-                )
+            EdgeToEdgeBottomSheetDialog(
+                onDismissRequest = { showThemeDialog = false }
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { showThemeDialog = false },
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = false) {},
-                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        shadowElevation = 16.dp
-                    ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 20.dp, vertical = 16.dp)
-                ) {
                     // Drag Handle Indicator
                     Box(
                         modifier = Modifier
@@ -386,6 +358,7 @@ fun AppearanceSettingsScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .weight(1f, fill = false)
                             .heightIn(max = 420.dp)
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -558,47 +531,14 @@ fun AppearanceSettingsScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
                     }
-                }
             }
         }
-    }
-}
-}
 
     // ── 2. Font Size Bottom Sheet Popup ───────────────────────────────────
         if (showFontSizeDialog) {
-            Dialog(
-                onDismissRequest = { showFontSizeDialog = false },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnBackPress = true,
-                    dismissOnClickOutside = true
-                )
+            EdgeToEdgeBottomSheetDialog(
+                onDismissRequest = { showFontSizeDialog = false }
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { showFontSizeDialog = false },
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = false) {},
-                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        shadowElevation = 16.dp
-                    ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 20.dp, vertical = 16.dp)
-                ) {
                     // Drag Handle Indicator
                     Box(
                         modifier = Modifier
@@ -634,7 +574,10 @@ fun AppearanceSettingsScreen(
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Column(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         AppFontSize.values().forEach { fontSizeOption ->
@@ -709,6 +652,4 @@ fun AppearanceSettingsScreen(
                 }
             }
         }
-    }
-}
 }
