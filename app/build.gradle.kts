@@ -19,7 +19,7 @@ android {
 
     // FIXED: Adjusted to match stable toolchain limits for AGP 8.4
     targetSdk = 36
-    versionCode = 6
+    versionCode = 7
     versionName = "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
