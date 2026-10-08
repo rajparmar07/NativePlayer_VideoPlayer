@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.screens
+package com.nativeplayer.videoplayer.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -24,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import com.nativeplayer.videoplayer.ui.components.EdgeToEdgeBottomSheetDialog
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -213,38 +214,9 @@ fun PlaylistsSettingsScreen(
 
         // Playlist Thumbnail Pattern Bottom Sheet Dialog
         if (showPatternDialog) {
-            Dialog(
-                onDismissRequest = { showPatternDialog = false },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnBackPress = true,
-                    dismissOnClickOutside = true
-                )
+            EdgeToEdgeBottomSheetDialog(
+                onDismissRequest = { showPatternDialog = false }
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { showPatternDialog = false },
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = false) {},
-                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        shadowElevation = 16.dp
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .navigationBarsPadding()
-                                .padding(horizontal = 20.dp, vertical = 16.dp)
-                        ) {
                             // Drag Handle Indicator
                             Box(
                                 modifier = Modifier
@@ -282,7 +254,10 @@ fun PlaylistsSettingsScreen(
 
                             // Radio list
                             Column(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f, fill = false)
+                                    .verticalScroll(rememberScrollState()),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 PlaylistThumbnailPattern.entries.forEach { pattern ->
@@ -347,9 +322,6 @@ fun PlaylistsSettingsScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
                         }
-                    }
-                }
             }
         }
-    }
 }

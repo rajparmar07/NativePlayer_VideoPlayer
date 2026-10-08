@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer.ui.screens
+package com.nativeplayer.videoplayer.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.nativeplayer.videoplayer.ui.components.EdgeToEdgeBottomSheetDialog
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
@@ -605,164 +606,106 @@ fun PlaybackSettingsScreen(
 
     // ── 3. Seek Interval Bottom Sheet Popup ─────────────────────────
     if (showSeekIntervalDialog) {
-        Dialog(
-            onDismissRequest = { showSeekIntervalDialog = false },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                dismissOnBackPress = true,
-                dismissOnClickOutside = true
-            )
+        EdgeToEdgeBottomSheetDialog(
+            onDismissRequest = { showSeekIntervalDialog = false }
         ) {
+            // Drag Handle Indicator
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { showSeekIntervalDialog = false },
-                contentAlignment = Alignment.BottomCenter
+                    .align(Alignment.CenterHorizontally)
+                    .width(36.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = false) {},
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 16.dp
+                Text(
+                    text = "Button Skip Duration",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                IconButton(
+                    onClick = { showSeekIntervalDialog = false }
                 ) {
-                    Column(
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // List items
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(5, 10, 15, 30, 60).forEach { sec ->
+                    val isSelected = buttonSeekSeconds == sec
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .navigationBarsPadding()
-                            .padding(horizontal = 20.dp, vertical = 16.dp)
+                            .selectable(
+                                selected = isSelected,
+                                onClick = {
+                                    viewModel.setButtonSeekSeconds(sec)
+                                    showSeekIntervalDialog = false
+                                }
+                            )
+                            .padding(horizontal = 4.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Drag Handle Indicator
                         Box(
                             modifier = Modifier
-                                .align(Alignment.CenterHorizontally)
-                                .width(36.dp)
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Header
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                                .size(18.dp)
+                                .border(
+                                    1.5.dp,
+                                    if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                    CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "Button Skip Duration",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 18.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            IconButton(
-                                onClick = { showSeekIntervalDialog = false }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Close settings",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            if (isSelected) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(MaterialTheme.colorScheme.primary, CircleShape)
                                 )
                             }
                         }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // List items
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf(5, 10, 15, 30, 60).forEach { sec ->
-                                val isSelected = buttonSeekSeconds == sec
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .selectable(
-                                            selected = isSelected,
-                                            onClick = {
-                                                viewModel.setButtonSeekSeconds(sec)
-                                                showSeekIntervalDialog = false
-                                            }
-                                        )
-                                        .padding(horizontal = 4.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(18.dp)
-                                            .border(
-                                                1.5.dp,
-                                                if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                                CircleShape
-                                            ),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isSelected) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(10.dp)
-                                                    .background(MaterialTheme.colorScheme.primary, CircleShape)
-                                            )
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.width(16.dp))
-                                    Text(
-                                        text = "$sec seconds",
-                                        fontSize = 15.sp,
-                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Text(
+                            text = "$sec seconds",
+                            fontSize = 15.sp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 
         // ── 1. Subtitle Style Bottom Sheet Popup ────────────────────────────────
         if (showStyleDialog) {
-            Dialog(
-                onDismissRequest = { showStyleDialog = false },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnBackPress = true,
-                    dismissOnClickOutside = true
-                )
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { showStyleDialog = false },
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = false) {},
-                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        shadowElevation = 16.dp
-                    ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 16.dp)
+            EdgeToEdgeBottomSheetDialog(
+                onDismissRequest = { showStyleDialog = false }
             ) {
                 // Drag Handle Indicator
                 Box(
@@ -805,6 +748,7 @@ fun PlaybackSettingsScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .weight(1f, fill = false)
                         .heightIn(max = 280.dp)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -905,44 +849,12 @@ fun PlaybackSettingsScreen(
                 Spacer(modifier = Modifier.height(16.dp))
             }
         }
-    }
-}
-}
 
     // ── 2. Thumbnail Frame Bottom Sheet Popup ───────────────────────────────
     if (showThumbnailDialog) {
-        Dialog(
-            onDismissRequest = { showThumbnailDialog = false },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                dismissOnBackPress = true,
-                dismissOnClickOutside = true
-            )
+        EdgeToEdgeBottomSheetDialog(
+            onDismissRequest = { showThumbnailDialog = false }
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { showThumbnailDialog = false },
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = false) {},
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 16.dp
-                ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 16.dp)
-            ) {
                 // Drag Handle Indicator
                 Box(
                     modifier = Modifier
@@ -984,6 +896,7 @@ fun PlaybackSettingsScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .weight(1f, fill = false)
                         .heightIn(max = 380.dp)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1085,53 +998,22 @@ fun PlaybackSettingsScreen(
                                         steps = 97,
                                         modifier = Modifier.fillMaxWidth()
                                     )
-                                    }
                                 }
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(16.dp))
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
-    }
-}
 
     // ── 4. Screenshot Location Bottom Sheet Popup ───────────────────────────
     if (showScreenshotLocationDialog) {
-        Dialog(
-            onDismissRequest = { showScreenshotLocationDialog = false },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                dismissOnBackPress = true,
-                dismissOnClickOutside = true
-            )
+        EdgeToEdgeBottomSheetDialog(
+            onDismissRequest = { showScreenshotLocationDialog = false }
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { showScreenshotLocationDialog = false },
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = false) {},
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 16.dp
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .navigationBarsPadding()
-                            .padding(horizontal = 20.dp, vertical = 16.dp)
-                    ) {
-                        // Drag Handle Indicator
+            // Drag Handle Indicator
                         Box(
                             modifier = Modifier
                                 .align(Alignment.CenterHorizontally)
@@ -1170,7 +1052,10 @@ fun PlaybackSettingsScreen(
 
                         // List items
                         Column(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = false)
+                                .verticalScroll(rememberScrollState()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             ScreenshotLocation.values().forEach { loc ->
@@ -1238,10 +1123,7 @@ fun PlaybackSettingsScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(16.dp))
-                    }
-                }
-            }
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
