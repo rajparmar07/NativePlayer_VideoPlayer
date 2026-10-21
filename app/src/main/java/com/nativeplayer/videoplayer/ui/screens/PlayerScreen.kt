@@ -328,6 +328,7 @@ fun PlayerScreen(
             .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build().apply {
                 playWhenReady = true
             }
@@ -871,6 +872,19 @@ fun PlayerScreen(
         }
     }
 
+    // Keep the screen awake while video is actively playing
+    DisposableEffect(isPlaying) {
+        val window = (context as? Activity)?.window
+        if (isPlaying) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     // Screen Lifecycle (Brightness, Orientation, & Immersive System Bars resets/coloring)
     DisposableEffect(Unit) {
         val activity = context as? Activity
@@ -917,6 +931,9 @@ fun PlayerScreen(
                 val attrs = win.attributes
                 attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 win.attributes = attrs
+
+                // Clear keep-screen-on flag
+                win.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
         }
     }
@@ -1501,6 +1518,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exoPlayer
                     useController = false // Use fully custom Compose UI dashboard
+                    keepScreenOn = isPlaying
                     setBackgroundColor(Color.BLACK)
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1511,6 +1529,7 @@ fun PlayerScreen(
             },
             update = { view ->
                 playerViewInstance = view
+                view.keepScreenOn = isPlaying
                 if (view.player != exoPlayer) {
                     view.player = exoPlayer
                 }
