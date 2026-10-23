@@ -21,6 +21,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.compose.animation.*
 import androidx.compose.animation.core.LinearEasing
@@ -179,11 +182,14 @@ fun PlayerScreen(
     val hardwareAccel by viewModel.hardwareAccelerationEnabled.collectAsState()
     val currentQueueIndex by viewModel.currentQueueIndex.collectAsState()
     val playbackQueue by viewModel.playbackQueue.collectAsState()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val isInPipMode by viewModel.isInPipMode.collectAsState()
+    val backgroundPlaybackEnabled by viewModel.backgroundPlaybackEnabled.collectAsState()
     val subtitleStyle by viewModel.subtitleStyle.collectAsState()
     val audioFocusEnabled by viewModel.audioFocusEnabled.collectAsState()
     val pauseOnHeadphonesDisconnectEnabled by viewModel.pauseOnHeadphonesDisconnectEnabled.collectAsState()
     val buttonSeekSeconds by viewModel.buttonSeekSeconds.collectAsState()
+    var wasPlayingBeforeBackground by remember { mutableStateOf(false) }
     var scale by remember { mutableFloatStateOf(1f) }
 
     // Fast Seek & 4K HEVC Override logic
@@ -364,6 +370,7 @@ fun PlayerScreen(
         val startPosition: Long
         val shouldPlay: Boolean
         if (isNewVideo) {
+            wasPlayingBeforeBackground = false
             isLoading = true
             currentPos = 0L
             duration = 0L
@@ -935,6 +942,44 @@ fun PlayerScreen(
                 // Clear keep-screen-on flag
                 win.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
+        }
+    }
+
+    // App Lifecycle (pauses playback when pressing Home or switching apps unless PiP or Background Playback is active)
+    DisposableEffect(lifecycleOwner, exoPlayer, backgroundPlaybackEnabled) {
+        val activity = context as? Activity
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    val inPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        activity?.isInPictureInPictureMode == true
+                    } else false
+
+                    if (!inPip && !backgroundPlaybackEnabled) {
+                        if (exoPlayer.isPlaying || exoPlayer.playWhenReady) {
+                            wasPlayingBeforeBackground = true
+                            exoPlayer.pause()
+                            viewModel.setVideoPlaying(false)
+                        }
+                    }
+                }
+                Lifecycle.Event.ON_START -> {
+                    val inPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        activity?.isInPictureInPictureMode == true
+                    } else false
+
+                    if (!inPip && !backgroundPlaybackEnabled && wasPlayingBeforeBackground) {
+                        wasPlayingBeforeBackground = false
+                        exoPlayer.play()
+                        viewModel.setVideoPlaying(true)
+                    }
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 

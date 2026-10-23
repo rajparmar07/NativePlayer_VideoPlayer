@@ -1,4 +1,4 @@
-﻿package com.nativeplayer.videoplayer
+package com.nativeplayer.videoplayer
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
@@ -287,5 +287,24 @@ class ResumePlaybackTest {
         // Switch back to APP_FOLDER
         viewModel.setScreenshotLocation(ScreenshotLocation.APP_FOLDER)
         assertEquals(ScreenshotLocation.APP_FOLDER, viewModel.screenshotLocation.value)
+    }
+
+    @Test
+    fun testBackgroundPlaybackSettingToggle() {
+        // Default is false (turned off by default)
+        assertFalse(viewModel.backgroundPlaybackEnabled.value)
+
+        // Toggle to true
+        viewModel.setBackgroundPlaybackEnabled(true)
+        assertTrue(viewModel.backgroundPlaybackEnabled.value)
+
+        // Verify persisted in SharedPreferences
+        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        assertTrue(prefs.getBoolean("background_playback_enabled", false))
+
+        // Toggle back to false
+        viewModel.setBackgroundPlaybackEnabled(false)
+        assertFalse(viewModel.backgroundPlaybackEnabled.value)
+        assertFalse(prefs.getBoolean("background_playback_enabled", true))
     }
 }
