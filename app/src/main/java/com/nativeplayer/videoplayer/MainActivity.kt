@@ -72,7 +72,6 @@ enum class ScreenTab(
 
 class MainActivity : ComponentActivity() {
     private lateinit var viewModel: VideoPlayerViewModel
-    private var wasPausedOnLeave = false
 
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -944,20 +943,17 @@ class MainActivity : ComponentActivity() {
                     .setActions(actions)
                     .setAspectRatio(rational)
                     .build()
-                enterPictureInPictureMode(params)
+                try {
+                    enterPictureInPictureMode(params)
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Failed to enter Picture-in-Picture: ${e.message}")
+                }
             }
-        } else if (currentVideo != null && isVideoPlaying && !isPipEnabled) {
-            viewModel.pause()
-            wasPausedOnLeave = true
         }
     }
 
     override fun onResume() {
         super.onResume()
-        if (wasPausedOnLeave) {
-            wasPausedOnLeave = false
-            viewModel.play()
-        }
         if (::viewModel.isInitialized) {
             viewModel.onAppResumed(this)
         }

@@ -21,6 +21,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.compose.animation.*
 import androidx.compose.animation.core.LinearEasing
@@ -179,11 +182,14 @@ fun PlayerScreen(
     val hardwareAccel by viewModel.hardwareAccelerationEnabled.collectAsState()
     val currentQueueIndex by viewModel.currentQueueIndex.collectAsState()
     val playbackQueue by viewModel.playbackQueue.collectAsState()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val isInPipMode by viewModel.isInPipMode.collectAsState()
+    val backgroundPlaybackEnabled by viewModel.backgroundPlaybackEnabled.collectAsState()
     val subtitleStyle by viewModel.subtitleStyle.collectAsState()
     val audioFocusEnabled by viewModel.audioFocusEnabled.collectAsState()
     val pauseOnHeadphonesDisconnectEnabled by viewModel.pauseOnHeadphonesDisconnectEnabled.collectAsState()
     val buttonSeekSeconds by viewModel.buttonSeekSeconds.collectAsState()
+    var wasPlayingBeforeBackground by remember { mutableStateOf(false) }
     var scale by remember { mutableFloatStateOf(1f) }
 
     // Fast Seek & 4K HEVC Override logic
@@ -206,6 +212,18 @@ fun PlayerScreen(
     var isSeekable by remember { mutableStateOf(true) }
     var lastSeekTargetMs by remember { mutableLongStateOf(-1L) }
     var lastSeekTimeMs by remember { mutableLongStateOf(0L) }
+    var isSeekSettling by remember { mutableStateOf(false) }
+    var pendingSeekTargetMs by remember { mutableLongStateOf(-1L) }
+    var wasPlayingBeforeSeekSession by remember { mutableStateOf<Boolean?>(null) }
+
+    // Safety timeout: ensure isSeekSettling never hangs indefinitely if playback stream stalls
+    LaunchedEffect(isSeekSettling) {
+        if (isSeekSettling) {
+            delay(3000L)
+            isSeekSettling = false
+            pendingSeekTargetMs = -1L
+        }
+    }
 
     var playbackErrorMsg by remember { mutableStateOf<String?>(null) }
     var snackbarMessage by remember { mutableStateOf<String?>(null) }
@@ -328,6 +346,7 @@ fun PlayerScreen(
             .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build().apply {
                 playWhenReady = true
             }
@@ -363,6 +382,7 @@ fun PlayerScreen(
         val startPosition: Long
         val shouldPlay: Boolean
         if (isNewVideo) {
+            wasPlayingBeforeBackground = false
             isLoading = true
             currentPos = 0L
             duration = 0L
@@ -374,6 +394,9 @@ fun PlayerScreen(
             isHwDecoderUnsupportedForCurrentVideo = false
             lastSeekTargetMs = -1L
             lastSeekTimeMs = 0L
+            isSeekSettling = false
+            pendingSeekTargetMs = -1L
+            wasPlayingBeforeSeekSession = null
 
             val resumeEnabled = viewModel.resumeFromLastLeftEnabled.value
             val savedState = if (resumeEnabled) viewModel.getVideoPlaybackState(video.urlOrPath) else null
@@ -651,7 +674,7 @@ fun PlayerScreen(
     // Periodically update progress from ExoPlayer
     LaunchedEffect(exoPlayer) {
         while (true) {
-            if (!isGestureSeeking && !isSliderDragging && !isLongPressActive) {
+            if (!isGestureSeeking && !isSliderDragging && !isLongPressActive && !isSeekSettling) {
                 currentPos = exoPlayer.currentPosition
                 duration = exoPlayer.duration.coerceAtLeast(0L)
                 bufferPos = exoPlayer.bufferedPosition
@@ -763,15 +786,18 @@ fun PlayerScreen(
     LaunchedEffect(gestureHudHideTrigger) {
         if (showGestureHud) {
             delay(GESTURE_HUD_HIDE_DELAY)
-            showGestureHud = false
-            activeGestureType = null
-            // Wait for the fadeOut exit animation (300ms) to fully complete before
-            // resetting seek state. This ensures:
-            //  1. Seek text never flickers to "+0s" while HUD is still visible
-            //  2. Controls don't reappear until after the HUD has fully faded out
-            delay(300L)
-            gestureSeekOffset = 0L
-            isGestureSeeking = false
+            if (!isGestureSeeking) {
+                showGestureHud = false
+                activeGestureType = null
+                // Wait for the fadeOut exit animation (300ms) to fully complete before
+                // resetting seek state. This ensures:
+                //  1. Seek text never flickers to "+0s" while HUD is still visible
+                //  2. Controls don't reappear until after the HUD has fully faded out
+                delay(300L)
+                if (!isGestureSeeking) {
+                    gestureSeekOffset = 0L
+                }
+            }
         }
     }
 
@@ -871,6 +897,19 @@ fun PlayerScreen(
         }
     }
 
+    // Keep the screen awake while video is actively playing
+    DisposableEffect(isPlaying) {
+        val window = (context as? Activity)?.window
+        if (isPlaying) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     // Screen Lifecycle (Brightness, Orientation, & Immersive System Bars resets/coloring)
     DisposableEffect(Unit) {
         val activity = context as? Activity
@@ -917,7 +956,48 @@ fun PlayerScreen(
                 val attrs = win.attributes
                 attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 win.attributes = attrs
+
+                // Clear keep-screen-on flag
+                win.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
+        }
+    }
+
+    // App Lifecycle (pauses playback when pressing Home or switching apps unless PiP or Background Playback is active)
+    DisposableEffect(lifecycleOwner, exoPlayer, backgroundPlaybackEnabled) {
+        val activity = context as? Activity
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    val inPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        activity?.isInPictureInPictureMode == true
+                    } else false
+
+                    if (!inPip && !backgroundPlaybackEnabled) {
+                        if (exoPlayer.isPlaying || exoPlayer.playWhenReady) {
+                            wasPlayingBeforeBackground = true
+                            exoPlayer.pause()
+                            viewModel.setVideoPlaying(false)
+                        }
+                    }
+                }
+                Lifecycle.Event.ON_START -> {
+                    val inPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        activity?.isInPictureInPictureMode == true
+                    } else false
+
+                    if (!inPip && !backgroundPlaybackEnabled && wasPlayingBeforeBackground) {
+                        wasPlayingBeforeBackground = false
+                        exoPlayer.play()
+                        viewModel.setVideoPlaying(true)
+                    }
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -933,9 +1013,13 @@ fun PlayerScreen(
                     }
                     Player.STATE_READY -> {
                         isLoading = false
+                        isSeekSettling = false
+                        pendingSeekTargetMs = -1L
                     }
                     Player.STATE_ENDED -> {
                         isLoading = false
+                        isSeekSettling = false
+                        pendingSeekTargetMs = -1L
                         if (isLongPressActive) {
                             val endedDir = longPressDirection
                             isLongPressActive = false
@@ -958,6 +1042,8 @@ fun PlayerScreen(
 
             override fun onRenderedFirstFrame() {
                 isLoading = false
+                isSeekSettling = false
+                pendingSeekTargetMs = -1L
             }
 
             override fun onIsPlayingChanged(isPlayingNew: Boolean) {
@@ -1358,7 +1444,7 @@ fun PlayerScreen(
             }
             // ── Gesture detection (works in both portrait & landscape) ──────────
             // Re-registered when gesture settings, seeking readiness, or lock states change.
-            .pointerInput(isLocked, isInPipMode, seekGestureEnabled, volumeGestureEnabled, brightnessGestureEnabled, isSeekable, seekSwipePixels, seekStepMs, volumeSwipePixels, brightnessSensitivitySetting, exoPlayer) {
+            .pointerInput(isLocked, isInPipMode, seekGestureEnabled, volumeGestureEnabled, brightnessGestureEnabled, isSeekable, seekSwipePixels, seekStepMs, volumeSwipePixels, brightnessSensitivitySetting, exoPlayer, activeFastSeek) {
                 if (isInPipMode) return@pointerInput
                 detectDragGestures(
                     onDragStart = { offset ->
@@ -1371,8 +1457,11 @@ fun PlayerScreen(
                         isGestureSeeking = false
                         showGestureHud = false
                         // Capture stable seek anchor and reset step tracker
-                        dragStartPos = currentPos
+                        dragStartPos = if (pendingSeekTargetMs >= 0L) pendingSeekTargetMs else currentPos
                         lastSeekSteps = 0L
+                        if (wasPlayingBeforeSeekSession == null) {
+                            wasPlayingBeforeSeekSession = exoPlayer.playWhenReady || isPlaying
+                        }
                     },
                     onDrag = { change, dragAmount ->
                         if (isLocked) return@detectDragGestures
@@ -1387,8 +1476,11 @@ fun PlayerScreen(
                                 abs(dragAccumX) > 10f && abs(dragAccumX) > abs(dragAccumY) * 1.2f && seekGestureEnabled && isSeekable -> {
                                     activeGestureType = GestureType.SEEK
                                     isGestureSeeking = true
-                                    wasPlayingBeforeSwipe = exoPlayer.playWhenReady || isPlaying
-                                    if (wasPlayingBeforeSwipe) {
+                                    isSeekSettling = true
+                                    if (wasPlayingBeforeSeekSession == null) {
+                                        wasPlayingBeforeSeekSession = exoPlayer.playWhenReady || isPlaying
+                                    }
+                                    if (exoPlayer.isPlaying) {
                                         exoPlayer.pause()
                                     }
                                     // CLOSEST_SYNC snaps to the nearest keyframe — far faster
@@ -1417,11 +1509,15 @@ fun PlayerScreen(
                                 // Live seek: fire exoPlayer.seekTo on every tiny step chunk crossing
                                 val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
                                 currentPos = target
+                                pendingSeekTargetMs = target
                                 if (steps != lastSeekSteps) {
                                     lastSeekSteps = steps
-                                    lastSeekTargetMs = target
-                                    lastSeekTimeMs = System.currentTimeMillis()
-                                    exoPlayer.seekTo(target)
+                                    val now = System.currentTimeMillis()
+                                    if (activeFastSeek || now - lastSeekTimeMs >= 100L) {
+                                        lastSeekTargetMs = target
+                                        lastSeekTimeMs = now
+                                        exoPlayer.seekTo(target)
+                                    }
                                 }
                             }
                             GestureType.BRIGHTNESS -> {
@@ -1451,21 +1547,28 @@ fun PlayerScreen(
                         }
                     },
                     onDragEnd = {
-                        if (isGestureSeeking) {
+                        val wasSeeking = isGestureSeeking
+                        isGestureSeeking = false
+                        if (wasSeeking) {
                             val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
                             android.util.Log.d("PlayerScreen", "Gesture drag end: target=$target, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
                             lastSeekTargetMs = target
                             lastSeekTimeMs = System.currentTimeMillis()
-                            exoPlayer.seekTo(target)
+                            pendingSeekTargetMs = target
                             currentPos = target
+                            isSeekSettling = true
                             exoPlayer.setSeekParameters(
                                 if (activeFastSeek) SeekParameters.CLOSEST_SYNC
                                 else SeekParameters.DEFAULT
                             )
-                            if (wasPlayingBeforeSwipe) {
+                            exoPlayer.seekTo(target)
+                            val shouldResume = wasPlayingBeforeSeekSession == true
+                            if (shouldResume) {
                                 exoPlayer.play()
-                                wasPlayingBeforeSwipe = false
+                            } else {
+                                exoPlayer.pause()
                             }
+                            wasPlayingBeforeSeekSession = null
                         }
                         // Brightness: intentionally NOT reset here — the gesture-set level
                         // stays for the full player session (matching VLC / MX Player behavior).
@@ -1473,21 +1576,28 @@ fun PlayerScreen(
                         gestureHudHideTrigger++
                     },
                     onDragCancel = {
-                        if (isGestureSeeking) {
+                        val wasSeeking = isGestureSeeking
+                        isGestureSeeking = false
+                        if (wasSeeking) {
                             val target = (dragStartPos + gestureSeekOffset).coerceIn(0L, duration)
                             android.util.Log.d("PlayerScreen", "Gesture drag cancel: target=$target, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
                             lastSeekTargetMs = target
                             lastSeekTimeMs = System.currentTimeMillis()
-                            exoPlayer.seekTo(target)
+                            pendingSeekTargetMs = target
                             currentPos = target
+                            isSeekSettling = true
                             exoPlayer.setSeekParameters(
                                 if (activeFastSeek) SeekParameters.CLOSEST_SYNC
                                 else SeekParameters.DEFAULT
                             )
-                            if (wasPlayingBeforeSwipe) {
+                            exoPlayer.seekTo(target)
+                            val shouldResume = wasPlayingBeforeSeekSession == true
+                            if (shouldResume) {
                                 exoPlayer.play()
-                                wasPlayingBeforeSwipe = false
+                            } else {
+                                exoPlayer.pause()
                             }
+                            wasPlayingBeforeSeekSession = null
                         }
                         gestureHudHideTrigger++
                     }
@@ -1501,6 +1611,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exoPlayer
                     useController = false // Use fully custom Compose UI dashboard
+                    keepScreenOn = isPlaying
                     setBackgroundColor(Color.BLACK)
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1511,6 +1622,7 @@ fun PlayerScreen(
             },
             update = { view ->
                 playerViewInstance = view
+                view.keepScreenOn = isPlaying
                 if (view.player != exoPlayer) {
                     view.player = exoPlayer
                 }
@@ -1823,15 +1935,30 @@ fun PlayerScreen(
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
-                                val current = exoPlayer.currentPosition
+                                val now = System.currentTimeMillis()
+                                val base = if (now - lastSeekTimeMs < 800L && pendingSeekTargetMs >= 0L) {
+                                    pendingSeekTargetMs
+                                } else {
+                                    exoPlayer.currentPosition
+                                }
                                 val seekStepMs = buttonSeekSeconds * 1000L
-                                val target = (current - seekStepMs).coerceAtLeast(0L)
+                                val target = (base - seekStepMs).coerceAtLeast(0L)
+                                val wasPlaying = if (isSeekSettling && wasPlayingBeforeSeekSession != null) {
+                                    wasPlayingBeforeSeekSession == true
+                                } else {
+                                    exoPlayer.playWhenReady || isPlaying
+                                }
+                                wasPlayingBeforeSeekSession = wasPlaying
                                 lastSeekTargetMs = target
-                                lastSeekTimeMs = System.currentTimeMillis()
+                                lastSeekTimeMs = now
+                                pendingSeekTargetMs = target
                                 currentPos = target
+                                isSeekSettling = true
                                 exoPlayer.seekTo(target)
-                                if (isPlaying || exoPlayer.playWhenReady) {
+                                if (wasPlaying) {
                                     exoPlayer.play()
+                                } else {
+                                    exoPlayer.pause()
                                 }
                             },
                             enabled = isSeekable,
@@ -1883,14 +2010,15 @@ fun PlayerScreen(
                                 .border(1.5.dp, MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f), CircleShape)
                                 .testTag("play_pause_video_button")
                         ) {
+                            val buttonIsPlaying = isPlaying || (isSeekSettling && (wasPlayingBeforeSeekSession ?: exoPlayer.playWhenReady))
                             AnimatedContent(
-                                targetState = isPlaying,
+                                targetState = buttonIsPlaying,
                                 transitionSpec = {
                                     (fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
                                      scaleIn(initialScale = 0.4f, animationSpec = tween(220, easing = FastOutSlowInEasing)))
                                         .togetherWith(
                                             fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)) +
-                                            scaleOut(targetScale = 0.4f, animationSpec = tween(180, easing = FastOutSlowInEasing))
+                                             scaleOut(targetScale = 0.4f, animationSpec = tween(180, easing = FastOutSlowInEasing))
                                         )
                                 },
                                 label = "play_pause_icon_morph"
@@ -1908,17 +2036,32 @@ fun PlayerScreen(
                         IconButton(
                             onClick = {
                                 resetControlsTimeout()
-                                val current = exoPlayer.currentPosition
+                                val now = System.currentTimeMillis()
+                                val base = if (now - lastSeekTimeMs < 800L && pendingSeekTargetMs >= 0L) {
+                                    pendingSeekTargetMs
+                                } else {
+                                    exoPlayer.currentPosition
+                                }
                                 val total = exoPlayer.duration.coerceAtLeast(0L)
                                 val seekStepMs = buttonSeekSeconds * 1000L
                                 val maxSeekTarget = (total - 1000L).coerceAtLeast(0L)
-                                val target = if (total > 0L) (current + seekStepMs).coerceAtMost(maxSeekTarget) else current + seekStepMs
+                                val target = if (total > 0L) (base + seekStepMs).coerceAtMost(maxSeekTarget) else base + seekStepMs
+                                val wasPlaying = if (isSeekSettling && wasPlayingBeforeSeekSession != null) {
+                                    wasPlayingBeforeSeekSession == true
+                                } else {
+                                    exoPlayer.playWhenReady || isPlaying
+                                }
+                                wasPlayingBeforeSeekSession = wasPlaying
                                 lastSeekTargetMs = target
-                                lastSeekTimeMs = System.currentTimeMillis()
+                                lastSeekTimeMs = now
+                                pendingSeekTargetMs = target
                                 currentPos = target
+                                isSeekSettling = true
                                 exoPlayer.seekTo(target)
-                                if (isPlaying || exoPlayer.playWhenReady) {
+                                if (wasPlaying) {
                                     exoPlayer.play()
+                                } else {
+                                    exoPlayer.pause()
                                 }
                             },
                             enabled = isSeekable,
@@ -1998,24 +2141,50 @@ fun PlayerScreen(
                             enabled = isSeekable,
                             onValueChange = {
                                 resetControlsTimeout()
-                                isSliderDragging = true
+                                if (!isSliderDragging) {
+                                    isSliderDragging = true
+                                    wasPlayingBeforeSeekSession = if (isSeekSettling && wasPlayingBeforeSeekSession != null) {
+                                        wasPlayingBeforeSeekSession
+                                    } else {
+                                        exoPlayer.playWhenReady || isPlaying
+                                    }
+                                }
                                 val target = (it * duration).toLong()
                                 currentPos = target
+                                pendingSeekTargetMs = target
+                                val now = System.currentTimeMillis()
                                 if (!activeFastSeek) {
-                                    lastSeekTargetMs = target
-                                    lastSeekTimeMs = System.currentTimeMillis()
-                                    exoPlayer.seekTo(target)
+                                    // Snap to keyframe is OFF: throttle seekTo to prevent MediaCodec overload
+                                    if (now - lastSeekTimeMs >= 100L) {
+                                        lastSeekTargetMs = target
+                                        lastSeekTimeMs = now
+                                        exoPlayer.seekTo(target)
+                                    }
+                                } else {
+                                    // Snap to keyframe is ON: throttle keyframe seeks
+                                    if (now - lastSeekTimeMs >= 120L) {
+                                        lastSeekTargetMs = target
+                                        lastSeekTimeMs = now
+                                        exoPlayer.seekTo(target)
+                                    }
                                 }
                             },
                             onValueChangeFinished = {
                                 isSliderDragging = false
                                 android.util.Log.d("PlayerScreen", "Slider change finished: currentPos=$currentPos, activeFastSeek=$activeFastSeek, seekable=${exoPlayer.isCurrentMediaItemSeekable}")
+                                val now = System.currentTimeMillis()
                                 lastSeekTargetMs = currentPos
-                                lastSeekTimeMs = System.currentTimeMillis()
+                                lastSeekTimeMs = now
+                                pendingSeekTargetMs = currentPos
+                                isSeekSettling = true
                                 exoPlayer.seekTo(currentPos)
-                                if (isPlaying || exoPlayer.playWhenReady) {
+                                val shouldResume = wasPlayingBeforeSeekSession == true
+                                if (shouldResume) {
                                     exoPlayer.play()
+                                } else {
+                                    exoPlayer.pause()
                                 }
+                                wasPlayingBeforeSeekSession = null
                             },
                             track = { sliderState ->
                                 val fraction = sliderState.value
@@ -2993,7 +3162,7 @@ fun PlayerScreen(
             }
         }
 
-        if (isLoading || exoPlayer.playbackState == Player.STATE_BUFFERING) {
+        if (isLoading || isSeekSettling || exoPlayer.playbackState == Player.STATE_BUFFERING) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

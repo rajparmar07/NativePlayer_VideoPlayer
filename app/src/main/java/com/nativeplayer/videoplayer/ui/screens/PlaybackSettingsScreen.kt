@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -55,6 +56,7 @@ fun PlaybackSettingsScreen(
     val fastSeekEnabled by viewModel.fastSeekEnabled.collectAsState()
     val controllerTimeout by viewModel.playerControllerTimeout.collectAsState()
     val pipEnabled by viewModel.pipEnabled.collectAsState()
+    val backgroundPlaybackEnabled by viewModel.backgroundPlaybackEnabled.collectAsState()
     val subtitleStyle by viewModel.subtitleStyle.collectAsState()
     val thumbnailMode by viewModel.thumbnailMode.collectAsState()
     val thumbnailPercentage by viewModel.thumbnailPercentage.collectAsState()
@@ -312,7 +314,60 @@ fun PlaybackSettingsScreen(
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
                     )
 
-                    // Item 5: Subtitle style
+                    // Item 5: Background playback
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 2.dp)
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = "Background Playback Icon",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Background playback",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Continue playing audio when pressing Home or switching apps",
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Switch(
+                            checked = backgroundPlaybackEnabled,
+                            onCheckedChange = { viewModel.setBackgroundPlaybackEnabled(it) },
+                            modifier = Modifier.padding(top = 2.dp).testTag("background_playback_switch")
+                        )
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                    )
+
+                    // Item 6: Subtitle style
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()

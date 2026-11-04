@@ -227,6 +227,16 @@ class VideoPlayerViewModel(
         prefs.edit().putBoolean("pip_enabled", enabled).apply()
     }
 
+    private val _backgroundPlaybackEnabled = MutableStateFlow(
+        prefs.getBoolean("background_playback_enabled", false)
+    )
+    val backgroundPlaybackEnabled: StateFlow<Boolean> = _backgroundPlaybackEnabled.asStateFlow()
+
+    fun setBackgroundPlaybackEnabled(enabled: Boolean) {
+        _backgroundPlaybackEnabled.value = enabled
+        prefs.edit().putBoolean("background_playback_enabled", enabled).apply()
+    }
+
     private val _audioFocusEnabled = MutableStateFlow(
         prefs.getBoolean("audio_focus_enabled", true)
     )
